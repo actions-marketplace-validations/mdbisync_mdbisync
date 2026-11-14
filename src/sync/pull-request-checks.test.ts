@@ -288,6 +288,54 @@ describe('sync: pull request checks', () => {
     assert.match(await show(`refs/heads/main:${path}`), /Formatted/);
   });
 
+  // The description is text anyone who may edit the pull request can change. Deleting its head note, or rewriting it to
+  // name the current head with no checks, must not drop a check that ran on an earlier head.
+  for (const fixes of [1, 2]) for (const tamper of ['deleted', 'forged'] as const) it(`does not merge ${fixes} formatter fix${fixes === 1 ? '' : 'es'} in a row when the head note is ${tamper}`, async () => {
+    const path = 'eng/notes/plan.md';
+    await editInLinear(path, '# Plan\n\nFirst edit.\n');
+    await sync();
+    const pushed = await rev(SYNC_BRANCH);
+    checksOn(pushed, [{ name: 'pre-commit', status: 'completed', conclusion: 'success' }, { name: 'tests', status: 'completed', conclusion: 'failure' }]);
+    let fixed = pushed;
+    for (let fix = 1; fix <= fixes; fix += 1) {
+      fixed = await editRef(SYNC_BRANCH, path, `# Plan\n\nFirst edit.\n\nFormatted ${fix}.\n`, 'Apply pre-commit fixes');
+      checksOn(fixed, [{ name: 'pre-commit', status: 'completed', conclusion: 'success' }]);
+      // A run between the fixes notes the head; the tampering below comes after the last one.
+      if (fix < fixes) await sync();
+    }
+    h.editHeadNote('mdbisync/linear', () => tamper === 'deleted' ? '' : `<!-- head: sha=${fixed} since=${new Date().toISOString()} -->`);
+    const run = await sync();
+    assert.equal(run.result.exitCode, 0, run.result.stderr);
+    assert.equal(run.report.pullRequest?.merged, null, 'merged a head that never ran `tests`');
+    assert.deepEqual(run.report.pullRequest?.checks?.missing, ['tests']);
+    assert.equal(await rev('refs/heads/main'), h.start);
+    const again = await sync();
+    assert.equal(again.report.pullRequest?.merged, null);
+    assert.deepEqual(again.report.pullRequest?.checks?.missing, ['tests']);
+    assert.equal(await rev('refs/heads/main'), h.start);
+    checksOn(fixed, [{ name: 'pre-commit', status: 'completed', conclusion: 'success' }, { name: 'tests', status: 'completed', conclusion: 'success' }]);
+    const merged = await sync();
+    assert.ok(merged.report.pullRequest?.merged);
+  });
+
+  // Both hold together: with the note gone, the checks read from the branch's history keep their publishers too.
+  it('does not let a commit status stand in for an earlier check run when the head note is deleted', async () => {
+    const path = 'eng/notes/plan.md';
+    await editInLinear(path, '# Plan\n\nFirst edit.\n');
+    await sync();
+    checksOn(await rev(SYNC_BRANCH), [{ name: 'pre-commit', status: 'completed', conclusion: 'success' }, { name: 'tests', status: 'completed', conclusion: 'failure' }]);
+    const fixed = await editRef(SYNC_BRANCH, path, '# Plan\n\nFirst edit.\n\nFormatted.\n', 'Apply pre-commit fixes');
+    const formatter: FakeCheck = { name: 'pre-commit', status: 'completed', conclusion: 'success' };
+    checksOn(fixed, [formatter, { name: 'tests', status: 'completed', conclusion: 'success', commitStatus: true, creator: 666 }]);
+    h.editHeadNote('mdbisync/linear', () => '');
+    const run = await sync();
+    assert.equal(run.result.exitCode, 0, run.result.stderr);
+    assert.equal(run.report.pullRequest?.merged, null, 'a commit status stood in for `tests` once the note was gone');
+    assert.deepEqual(run.report.pullRequest?.checks?.missing, ['tests']);
+    assert.equal(await rev('refs/heads/main'), h.start);
+    assert.match(openPullRequests()[0]?.body ?? '', new RegExp(`<!-- head: sha=${fixed} since=\\S+ checks=pre-commit@run:${FAKE_ACTIONS_APP_ID},tests@run:${FAKE_ACTIONS_APP_ID} -->`));
+  });
+
   // Anyone who may write commit statuses can name one after a check run; only the check's own publisher proves it ran.
   it('does not let a commit status or another app stand in for an expected check run', async () => {
     const path = 'eng/notes/plan.md';
@@ -311,6 +359,30 @@ describe('sync: pull request checks', () => {
     checksOn(fixed, [formatter, { name: 'tests', status: 'completed', conclusion: 'success' }]);
     const merged = await sync();
     assert.ok(merged.report.pullRequest?.merged);
+  });
+
+  it('holds a head whose history runs past the search bound before a commit of the sync\'s own', async () => {
+    const path = 'eng/notes/plan.md';
+    await editInLinear(path, '# Plan\n\nFirst edit.\n');
+    await sync();
+    let head = await rev(SYNC_BRANCH);
+    for (let fix = 1; fix <= 51; fix += 1) head = await editRef(SYNC_BRANCH, path, `# Plan\n\nFirst edit.\n\nFormatted ${fix}.\n`, 'Apply fixes');
+    checksOn(head, [{ name: 'tests', status: 'completed', conclusion: 'success' }]);
+    const run = await sync();
+    assert.equal(run.result.exitCode, 0, run.result.stderr);
+    assert.equal(run.report.pullRequest?.merged, null, 'merged without knowing the checks of its earlier heads');
+    assert.equal(await rev('refs/heads/main'), h.start);
+    // A Linear change is pushed on top: the sync's own merge ends the history, and the new head merges.
+    await editInLinear('combined/guide.md', '# Guide\n\nLater edit.\n');
+    const transport = fakeFetch(h.world);
+    h.fetchOverride = async (input, init) => {
+      const match = String(input).match(/\/commits\/([0-9a-f]+)\/check-runs/);
+      if (match && !h.world.github.checks?.has(match[1]!)) checksOn(match[1]!, [{ name: 'tests', status: 'completed', conclusion: 'success' }]);
+      return transport(input, init);
+    };
+    const recovered = await sync({ MDBISYNC_MERGE_GRACE_SECONDS: '20' });
+    assert.equal(recovered.report.pullRequest?.branchMoved, true, 'kept the held head instead of pushing the Linear change');
+    assert.ok(recovered.report.pullRequest?.merged);
   });
 
   it('expects a commit status from the account that published it on the earlier head', async () => {

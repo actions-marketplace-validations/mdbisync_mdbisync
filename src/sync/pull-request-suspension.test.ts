@@ -4,7 +4,7 @@ import assert from 'node:assert/strict';
 import { MARKS } from './marks.ts';
 import { HOLD_MARK_LIMIT } from './hold.ts';
 import { INCOMPLETE_EXIT_CODE, SETUP_FAILED_EXIT_CODE } from '../commands.ts';
-import { FAKE_ACTIONS_APP_ID, type FakeCheck, type FakeDocument, touch } from '../setup/test-helpers.ts';
+import { FAKE_ACTIONS_APP_ID, type FakeCheck, type FakeDocument, fakeFetch, touch } from '../setup/test-helpers.ts';
 import { CHECK_NAME } from '../../test/corpus/check-workflow.ts';
 import { describe, it } from 'node:test';
 import { pullRequestHarness, CANARY, MANY, SYNC_BRANCH } from './pull-request-test-helpers.ts';
@@ -390,6 +390,32 @@ describe('sync: pull request suspension', () => {
     assert.match(await show(`refs/heads/main:${path}`), /Formatted/);
   });
 
+  // Editing the suspended pull request's description cannot drop the check its earlier head failed.
+  for (const fixes of [1, 2]) for (const tamper of ['deleted', 'forged'] as const) it(`does not release ${fixes} suspended fix${fixes === 1 ? '' : 'es'} in a row when the head note is ${tamper}`, async () => {
+    const path = 'eng/notes/plan.md';
+    await suspendOne(path);
+    await sync();
+    let fixed = await rev(SUSPENDED);
+    for (let fix = 1; fix <= fixes; fix += 1) {
+      fixed = await h.editRef(SUSPENDED, path, `# Plan\n\nHeld Linear edit.\n\nFormatted ${fix}.\n`, 'Apply pre-commit fixes');
+      checksOn(fixed, [{ name: 'pre-commit', status: 'completed', conclusion: 'success' }]);
+      if (fix < fixes) await sync();
+    }
+    h.editHeadNote('mdbisync/suspended', () => tamper === 'deleted' ? '' : `<!-- head: sha=${fixed} since=${new Date().toISOString()} -->`);
+    const start = await rev('refs/heads/main');
+    const waiting = await sync();
+    assert.equal(waiting.result.exitCode, 0, waiting.result.stderr);
+    assert.equal(waiting.report.pullRequest?.suspended?.released, undefined, 'released a head that never ran `ci`');
+    assert.equal(await rev(SUSPENDED), fixed);
+    assert.equal(await rev('refs/heads/main'), start);
+    const again = await sync();
+    assert.equal(again.report.pullRequest?.suspended?.released, undefined);
+    assert.equal(await rev('refs/heads/main'), start);
+    checksOn(fixed, [...PASSED, { name: 'pre-commit', status: 'completed', conclusion: 'success' }]);
+    const released = await sync();
+    assert.ok(released.report.pullRequest?.suspended?.released);
+  });
+
   it('does not release a suspended batch on a commit status named after the check run its earlier head ran', async () => {
     const path = 'eng/notes/plan.md';
     await suspendOne(path);
@@ -404,6 +430,30 @@ describe('sync: pull request suspension', () => {
     checksOn(fixed, [formatter, ...PASSED]);
     const released = await sync();
     assert.ok(released.report.pullRequest?.suspended?.released);
+  });
+
+  // A Linear edit of a suspended document is a push of the sync's own on the suspended branch: a check its CI no longer
+  // runs (a renamed job) stays expected for that one push only, as on the normal lane.
+  it('stops expecting a renamed check once the sync pushed the suspended branch twice', async () => {
+    const path = 'eng/notes/plan.md';
+    await suspendOne(path);
+    checksOn(await rev(SUSPENDED), [{ name: 'old-job', status: 'completed', conclusion: 'failure' }]);
+    const transport = fakeFetch(h.world);
+    h.fetchOverride = async (input, init) => {
+      const match = String(input).match(/\/commits\/([0-9a-f]+)\/check-runs/);
+      if (match && !h.world.github.checks?.has(match[1]!)) checksOn(match[1]!, [{ name: 'new-job', status: 'completed', conclusion: 'success' }]);
+      return transport(input, init);
+    };
+    const noGrace = { MDBISYNC_MERGE_GRACE_SECONDS: '0' };
+    await editInLinear(path, '# Plan\n\nHeld Linear edit, second.\n');
+    await sync(noGrace);
+    const first = await rev(SUSPENDED);
+    await editInLinear(path, '# Plan\n\nHeld Linear edit, third.\n');
+    await sync(noGrace);
+    assert.notEqual(await rev(SUSPENDED), first, 'the second Linear edit did not reach the suspended branch');
+    const released = await sync();
+    assert.ok(released.report.pullRequest?.suspended?.released, 'still waits for a check its CI no longer runs');
+    assert.match(await show(`refs/heads/main:${path}`), /third/);
   });
 
   it('a batch that joins the suspended lane keeps the checks its heads ran expected', async () => {

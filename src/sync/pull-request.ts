@@ -243,10 +243,16 @@ export async function syncPullRequest(context: RunContext, options: PullRequestO
     const merger = markedMerger(git, options.state.ids, identity, frozen);
     /** What this run's merges into the sync branch resolved; reported only once the branch has moved to them. */
     const resolved: Resolution = { marked: [], decided: [] };
+    // A head whose earlier checks the history does not show is never kept: the sync's next push (Linear's changes) is
+    // what lets it merge again.
+    const checkedExpectation = async () => {
+      const known = await expectedChecks(github, sync as Oid, options.requiredChecks ?? [], { body: open?.body, git, base: tracked, linear });
+      return known.complete ? checkExpectation(options, known.checks) : null;
+    };
     const keepCheckedHead = open !== null && pending && suspended?.waiting !== true && noted === null
       && await mergedTree(git, tracked, sync as Oid) !== null
       && !(await needsTrackedMerge(git, tracked, sync as Oid, noted))
-      && await checkedHeadReady(github, sync as Oid, checkExpectation(options, (await expectedChecks(github, sync as Oid, options.requiredChecks ?? [], { body: open.body })).checks));
+      && await checkedHeadReady(github, sync as Oid, await checkedExpectation());
     let head: Oid | null = sync;
     if (open === null && (!pending || (await holdsInitialRecord(git, sync as Oid, tracked)))) {
       // A merged branch can start again from Linear. An older initial
@@ -319,7 +325,7 @@ export async function syncPullRequest(context: RunContext, options: PullRequestO
     const since = headSince(open?.body, head, new Date());
     // Checks that ran on the pull request's earlier heads must pass on this one too; the description notes them.
     // A head this run pushed expects what the head it was pushed on registered (see `expectedChecks`).
-    const expected = await expectedChecks(github, head, options.requiredChecks ?? [], result.branchMoved ? { pushedFrom: sync === null ? [] : [sync] } : { body: open?.body });
+    const expected = await expectedChecks(github, head, options.requiredChecks ?? [], result.branchMoved ? { pushedFrom: sync === null ? [] : [sync] } : { body: open?.body, git, base: tracked, linear });
     const stillHeld = hold === null ? null : { ...hold, head };
     // Whoever added commits to the sync branch, the sync merges only changes to synchronized documents and their assets.
     const unverified = await unverifiedPaths(git, trackedTree, headTree, context.mapping.zones);
@@ -393,6 +399,8 @@ export async function syncPullRequest(context: RunContext, options: PullRequestO
       result.waitsForSuspended = true;
       return result;
     }
+    // Earlier checks the branch's history does not show within the bound may not have run: wait for the sync's next push.
+    if (!expected.complete) return result;
     const merge = await mergePullRequest(github, pullRequest.number, head);
     if (!merge.merged) {
       const refusal: MergeRefusal = { head, base: tracked, status: merge.status, reason: merge.reason };
@@ -423,7 +431,8 @@ export async function syncPullRequest(context: RunContext, options: PullRequestO
  * them in. An empty check list does not establish completed CI here.
  * Tracked-branch reconciliation and the final exact-head check still run.
  */
-async function checkedHeadReady(github: GitHubRepository, head: Oid, expectation: CheckExpectation): Promise<boolean> {
+async function checkedHeadReady(github: GitHubRepository, head: Oid, expectation: CheckExpectation | null): Promise<boolean> {
+  if (expectation === null) return false;
   const checks = await readChecks(github, head, expectation);
   return checks.hasChecks && checks.state === 'passed';
 }
