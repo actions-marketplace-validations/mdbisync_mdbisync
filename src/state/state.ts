@@ -9,6 +9,7 @@ import { type Git, GitError, type Oid, mapLimit } from './git.ts';
 import { type LfsPointer, type LfsReadResult, lfsReader, parseLfsPointer } from './lfs.ts';
 import { type CommitIdentity, type TreeEntry, commitTree, listTree, readBlobs } from './objects.ts';
 import { message } from '../messages.ts';
+import { PUSHED_MAC, type PushedRecord } from './pushed.ts';
 
 /** The state refs as last fetched from the remote; null when a ref does not exist. */
 export type StateSnapshot = Record<Store, Oid | null>;
@@ -327,9 +328,12 @@ export interface SuspensionEpisode {
   head?: Oid;
   /**
    * The last head the sync itself pushed on the suspended branch; unlike `head`, a commit someone else pushed there
-   * never takes its place. The checks expected of a later head are read down to it.
+   * never takes its place. The checks expected of a later head are read down to it, once `pushedMac` proves the sync
+   * recorded it (see `PushedKey`).
    */
   pushed?: Oid;
+  /** The sync's signature of `pushed` on the suspended branch; a value in any other form is no signature. */
+  pushedMac?: string;
   /** Paths of this episode; one entry also holds former names and assets for the lane. */
   paths: string[];
   checks: string[];
@@ -515,25 +519,31 @@ export async function readWrittenHashes(git: Git, commit: Oid | null): Promise<M
 
 /**
  * The last head the sync itself pushed on the sync branch, kept beside
- * `ids.json`. Only the sync's own push sets it, so a commit someone else
- * pushed there never takes its place: the checks expected of a later head
- * are read down to it.
+ * `ids.json` with the sync's signature (see `PushedKey`). Only the sync's own
+ * push sets it, so a commit someone else pushed there never takes its place:
+ * the checks expected of a later head are read down to it.
  */
 export const SYNC_PUSHED_FILE = 'sync-pushed.json';
 
-/** The head `SYNC_PUSHED_FILE` records; none when the commit does not have the file. */
-export async function readSyncPushed(git: Git, commit: Oid | null): Promise<Oid | undefined> {
+/**
+ * The record `SYNC_PUSHED_FILE` holds, as written: its signature is checked
+ * where it is used (`PushedKey.verified`). None when the commit does not have the file.
+ */
+export async function readSyncPushed(git: Git, commit: Oid | null): Promise<PushedRecord | undefined> {
   if (commit === null) return undefined;
   const read = await git.run(['cat-file', 'blob', `${commit}:${SYNC_PUSHED_FILE}`], { okCodes: [0, 128] });
   if (read.code !== 0) return undefined;
-  let head: unknown;
+  let data: { head?: unknown; mac?: unknown } | null;
   try {
-    head = (JSON.parse(read.stdout.toString('utf8')) as { head?: unknown } | null)?.head;
+    data = JSON.parse(read.stdout.toString('utf8')) as { head?: unknown; mac?: unknown } | null;
   } catch {
     throw new Error(message('state.invalid-json', { file: SYNC_PUSHED_FILE, commit }));
   }
+  const head = data?.head;
   if (typeof head !== 'string' || !/^[0-9a-f]{40,64}$/.test(head)) throw new Error(message('state.invalid-entry', { file: SYNC_PUSHED_FILE }));
-  return head;
+  // A signature in any other form is no signature: the record counts as none where it is used.
+  const mac = data?.mac;
+  return typeof mac === 'string' && PUSHED_MAC.test(mac) ? { head, mac } : { head };
 }
 
 /**
@@ -541,14 +551,14 @@ export async function readSyncPushed(git: Git, commit: Oid | null): Promise<Oid 
  * superseded ids, the written hashes and the sync branch's pushed head) on
  * top of `parent`. Returns `parent` when nothing changed, unless `always`.
  * `syncPushed` records the head the sync pushes on the sync branch together
- * with this commit; left out, the head `parent` records is kept.
+ * with this commit, signed; left out, the record `parent` holds is kept as it is.
  */
 export async function commitIds(
   git: Git,
   parent: Oid | null,
   ids: IdMap,
   identity: CommitIdentity,
-  options: CommitStateOptions & { reserved?: ReadonlyMap<string, string>; superseded?: ReadonlyMap<string, string>; written?: ReadonlyMap<string, string>; syncPushed?: Oid } = {},
+  options: CommitStateOptions & { reserved?: ReadonlyMap<string, string>; superseded?: ReadonlyMap<string, string>; written?: ReadonlyMap<string, string>; syncPushed?: PushedRecord } = {},
 ): Promise<Oid> {
   const entries = [...ids.entries()].sort(([a], [b]) => compareStrings(a, b));
   const data = Object.fromEntries(entries.map(([path, entry]) => [path, entry]));
@@ -558,7 +568,7 @@ export async function commitIds(
   if (options.superseded !== undefined && options.superseded.size > 0) files.set(SUPERSEDED_IDS_FILE, sorted(options.superseded));
   if (options.written !== undefined && options.written.size > 0) files.set(WRITTEN_FILE, sorted(options.written));
   const syncPushed = options.syncPushed ?? await readSyncPushed(git, parent);
-  if (syncPushed !== undefined) files.set(SYNC_PUSHED_FILE, { head: syncPushed });
+  if (syncPushed !== undefined) files.set(SYNC_PUSHED_FILE, syncPushed.mac === undefined ? { head: syncPushed.head } : { head: syncPushed.head, mac: syncPushed.mac });
   return commitJsonFiles(git, parent, files, options.message ?? 'Update document ids', identity, options.always === true);
 }
 

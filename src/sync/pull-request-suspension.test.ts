@@ -437,6 +437,38 @@ describe('sync: pull request suspension', () => {
     assert.ok(released.report.pullRequest?.suspended?.released);
   });
 
+  // The episodes in the sync's state are a ref anyone who may push can rewrite: naming a head there as the sync's own
+  // push, rebuilt on the tracked branch so no earlier check is below it, does not end the suspended branch's history.
+  it('does not release a head someone else recorded as its own push on the suspended branch', async () => {
+    const path = 'eng/notes/plan.md';
+    await suspendOne(path);
+    await sync();
+    const held = await rev(SUSPENDED);
+    const env = { GIT_AUTHOR_NAME: 'a', GIT_AUTHOR_EMAIL: 'a@example.com', GIT_COMMITTER_NAME: 'a', GIT_COMMITTER_EMAIL: 'a@example.com' };
+    const message = await h.fixture.remote.text(['show', '-s', '--format=%B', held]);
+    const forged = await h.fixture.remote.text(['commit-tree', `${held}^{tree}`, '-p', await rev('refs/heads/main'), '-m', message], { env });
+    await h.forcePush(SUSPENDED, forged);
+    const recorded = await ids() as Record<string, { suspended?: { pushed?: string; pushedMac?: unknown } }>;
+    // A signature in a form the sync never writes is no signature either: the run goes on without it.
+    for (const entry of Object.values(recorded)) if (entry.suspended !== undefined) Object.assign(entry.suspended, { pushed: forged, pushedMac: { forged: true } });
+    await h.editRef('refs/mdbisync/ids', 'ids.json', `${JSON.stringify(recorded, null, 2)}\n`, 'Record');
+    const status: FakeCheck = { name: 'deploy', status: 'completed', conclusion: 'success', commitStatus: true, creator: 666 };
+    checksOn(forged, [status]);
+    h.editHeadNote('mdbisync/suspended', () => '');
+    const start = await rev('refs/heads/main');
+    const checked = { MDBISYNC_MERGE_WITHOUT_CHECKS: 'false' };
+    const waiting = await sync(checked);
+    assert.equal(waiting.result.exitCode, 0, waiting.result.stderr);
+    assert.equal(waiting.report.pullRequest?.suspended?.released, undefined, 'released a head whose checks never ran');
+    assert.equal(await rev('refs/heads/main'), start);
+    // The sync's own commit on top runs the checks again; its record holds from run to run, and once they pass it releases.
+    const again = await rev(SUSPENDED);
+    assert.equal(await h.fixture.remote.text(['show', '-s', '--format=%P%n%s', again]), `${forged}\nRun the checks again on suspended changes`);
+    checksOn(again, [...PASSED, status]);
+    const released = await sync(checked);
+    assert.ok(released.report.pullRequest?.suspended?.released, 'did not release the sync\'s own push once its checks passed');
+  });
+
   it('does not release a suspended batch on a commit status named after the check run its earlier head ran', async () => {
     const path = 'eng/notes/plan.md';
     await suspendOne(path);
