@@ -368,14 +368,45 @@ export class LinearClient {
     return comment;
   }
 
-  /** Whether a comment with this id exists (resolved or archived ones too). */
-  async commentExists(id: string): Promise<boolean> {
-    const data = await this.request<{ comments: { nodes: Array<{ id: string }> } }>(
-      'FindComment', 'query',
-      `query FindComment($id: ID!) { comments(first: 1, includeArchived: true, filter: { id: { eq: $id } }) { nodes { id } } }`,
-      { id },
-    );
-    return data.comments.nodes.some((comment) => comment.id === id);
+  /** Whether an integration comment exists on this document (including archived comments). */
+  async commentExists(id: string, documentId: string): Promise<boolean> {
+    return (await this.#documentCommentIds(new Map([[id, documentId]]), 'FindComment')).has(id);
+  }
+
+  /** Authorize a batch before any notice mutation, without a read per hold. */
+  async documentCommentIds(expected: ReadonlyMap<string, string>): Promise<Set<string>> {
+    return this.#documentCommentIds(expected, 'FindComments');
+  }
+
+  async #documentCommentIds(expected: ReadonlyMap<string, string>, operation: 'FindComment' | 'FindComments'): Promise<Set<string>> {
+    const found = new Set<string>();
+    const ids = [...expected.keys()];
+    for (let offset = 0; offset < ids.length; offset += MAX_PAGE_SIZE) {
+      const batch = ids.slice(offset, offset + MAX_PAGE_SIZE);
+      const requested = new Set(batch);
+      const data = await this.request<{
+        viewer: { id: string } | null;
+        comments: { nodes: Array<{ id: string; user: { id: string } | null; documentContent: { document: { id: string } | null } | null }> };
+      }>(
+        operation, 'query',
+        `query ${operation}($ids: [ID!]!, $first: Int!) {
+          viewer { id }
+          comments(first: $first, includeArchived: true, filter: { id: { in: $ids } }) {
+            nodes { id user { id } documentContent { document { id } } }
+          }
+        }`,
+        { ids: batch, first: batch.length },
+      );
+      for (const comment of data.comments.nodes) {
+        if (!requested.has(comment.id) || found.has(comment.id)
+          || comment.documentContent?.document?.id !== expected.get(comment.id)
+          || !data.viewer?.id || comment.user?.id !== data.viewer.id) {
+          throw new LinearError(operation, message('linear.comment-mismatch'));
+        }
+        found.add(comment.id);
+      }
+    }
+    return found;
   }
 
   /**
@@ -401,16 +432,21 @@ export class LinearClient {
    */
   async ensureDocumentComment(documentContentId: string, body: string, id: string, updateExisting = false, createFirst = false): Promise<{ id: string; created: boolean }> {
     const find = async (): Promise<boolean> => {
-      const data = await this.request<{ comments: { nodes: Array<{ id: string; documentContentId: string | null }> } }>(
+      const data = await this.request<{
+        viewer: { id: string } | null;
+        comments: { nodes: Array<{ id: string; documentContentId: string | null; user: { id: string } | null }> };
+      }>(
         'FindDocumentComment', 'query',
         `query FindDocumentComment($id: ID!) {
-          comments(first: 1, includeArchived: true, filter: { id: { eq: $id } }) { nodes { id documentContentId } }
+          viewer { id }
+          comments(first: 1, includeArchived: true, filter: { id: { eq: $id } }) { nodes { id documentContentId user { id } } }
         }`,
         { id },
       );
       const comment = data.comments.nodes[0];
       if (!comment) return false;
-      if (comment.id !== id || comment.documentContentId !== documentContentId) {
+      if (comment.id !== id || comment.documentContentId !== documentContentId
+        || !data.viewer?.id || comment.user?.id !== data.viewer.id) {
         throw new LinearError('FindDocumentComment', message('linear.comment-mismatch'));
       }
       return true;

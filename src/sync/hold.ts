@@ -4,10 +4,9 @@
 // is set after the push that records the episodes, its comment is edited
 // when a later failure reads differently, and both clear at release.
 //
-// Linear's request budget is the scarce one: a mark set or cleared costs a
-// document two requests (icon, comment), a changed comment one, and no
-// document is read for it (the capture's listing holds icon, color and the
-// comment target). At most `HOLD_MARK_LIMIT` documents change per run.
+// Linear's request budget is the scarce one: the capture supplies document
+// metadata, but saved comments need an ownership read before any mutation.
+// At most `HOLD_MARK_LIMIT` documents change per run.
 
 import { createHash } from 'node:crypto';
 import { LinearError, LinearGraphQLError, LinearHttpError, LinearStoppedError, describeLinearError, isTransientLinearError, type LinearClient, type LinearDocument } from '../linear/index.ts';
@@ -16,6 +15,7 @@ import { type RunContext } from '../run/preflight.ts';
 import { type HoldNotice, type IdEntry, type Oid, type StateConfig, type StateSnapshot, listTree, pushAtomic, readIds, stateRef } from '../state/index.ts';
 import { MARKS, resolveHold } from './marks.ts';
 import { commitLaneIds } from './suspended.ts';
+import { message } from '../messages.ts';
 
 /** The most documents whose suspended mark or comment changes in one run; the rest follow in later runs. */
 export const HOLD_MARK_LIMIT = 50;
@@ -41,7 +41,7 @@ export interface HoldFailure {
   timedOut?: string[];
 }
 
-export type HoldClient = Pick<LinearClient, 'updateDocument' | 'ensureDocumentComment' | 'updateDocumentComment' | 'resolveComment' | 'commentExists'>;
+export type HoldClient = Pick<LinearClient, 'updateDocument' | 'ensureDocumentComment' | 'updateDocumentComment' | 'resolveComment' | 'documentCommentIds'>;
 
 
 export interface HoldMarksOptions {
@@ -281,6 +281,9 @@ export async function reconcileHoldMarks(context: RunContext, options: HoldMarks
   result.deferred = work.length - chosen.length;
   // Comments are written only for the chosen documents: the rest read nothing this run.
   for (const item of chosen) if (item.kind === 'set') Object.assign(item, await bodyOf(item.path, item.entry));
+  // A notice without a saved receipt is created before its decoration changes.
+  // Create cannot overwrite an existing id; recovery checks its remote owner.
+  const creating = new Set<Work>(chosen.filter((item) => item.kind === 'set' && item.entry.saved?.hold === undefined));
 
   let expected = options.state.ids;
   const persist = async () => {
@@ -311,11 +314,30 @@ export async function reconcileHoldMarks(context: RunContext, options: HoldMarks
   };
   let current: Work | undefined;
   try {
+    const expected = new Map<string, string>();
+    const expect = (id: string, documentId: string) => {
+      if (expected.has(id) && expected.get(id) !== documentId) throw new LinearError('FindComments', message('linear.comment-mismatch'));
+      expected.set(id, documentId);
+    };
+    for (const item of chosen) {
+      if (!creating.has(item)) expect((item.entry.saved?.hold as HoldNotice).id, item.entry.id);
+      if (item.kind === 'set' && item.previous !== undefined) expect(item.previous.id, item.entry.id);
+    }
+    const found = await linear.documentCommentIds(expected);
+    // The batch is fully authorized before its first mutation. Resolutions
+    // reuse those checked results instead of repeating one read per comment.
+    const checked = {
+      commentExists: async (id: string, documentId: string) => {
+        if (expected.get(id) !== documentId) throw new LinearError('FindComments', message('linear.comment-mismatch'));
+        return found.has(id);
+      },
+      resolveComment: (id: string) => linear.resolveComment(id),
+    };
     for (const item of chosen) {
       current = item;
       const { document, path } = item;
       if (item.kind === 'clear') {
-        const resolved = await resolveCleared(linear, item.entry.saved?.hold as HoldNotice);
+        const resolved = await resolveCleared(checked, item.entry.saved?.hold as HoldNotice, item.entry.id);
         const { hold: _hold, ...saved } = item.entry.saved as NonNullable<IdEntry['saved']>;
         // A conflict or blocked notice still stands: its own mark comes back. Otherwise the document's own decoration.
         const mark = saved.notice === undefined ? { icon: saved.icon, color: saved.color } : MARKS[saved.notice.kind];
@@ -329,23 +351,23 @@ export async function reconcileHoldMarks(context: RunContext, options: HoldMarks
         continue;
       }
       if (document === undefined) continue;
+      const hold = item.entry.saved?.hold as HoldNotice;
       if (item.kind === 'repaint') {
         await linear.updateDocument(document.id, MARKS.suspended);
         result.updated.push(path);
         continue;
       }
       if (item.kind === 'set' && item.previous !== undefined) {
-        await resolveHold(linear, item.previous);
+        await resolveHold(checked, item.previous, item.entry.id);
         ids.set(path, item.entry);
       }
       if (!document.documentContentId) continue;
-      const hold = item.entry.saved?.hold as HoldNotice;
       if (item.kind === 'set') {
+        // The id was chosen before the suspension's push and never posted by this sync: create it directly,
+        // and a refused duplicate checks its document and author before updating it.
+        await linear.ensureDocumentComment(document.documentContentId, item.body as string, hold.id, true, true);
         const mark = MARKS.suspended;
         if (document.icon !== mark.icon || document.color !== mark.color) await linear.updateDocument(document.id, mark);
-        // The id was chosen before the suspension's push and never posted by this sync: create it directly,
-        // and a create Linear refuses because the id exists finds it and updates its text.
-        await linear.ensureDocumentComment(document.documentContentId, item.body as string, hold.id, true, true);
         ids.set(path, withHold(item.entry, { ...hold, posted: true }));
         result.set.push(path);
       } else {
@@ -370,9 +392,9 @@ export async function reconcileHoldMarks(context: RunContext, options: HoldMarks
  * forgotten, so it never stalls the step run after run. An outage, a stop, or a refusal of the token, its scope
  * or the rate still ends the step, and a later run tries again.
  */
-async function resolveCleared(linear: HoldClient, hold: HoldNotice): Promise<true | string> {
+async function resolveCleared(linear: Pick<LinearClient, 'resolveComment' | 'commentExists'>, hold: HoldNotice, documentId: string): Promise<true | string> {
   try {
-    await resolveHold(linear, hold);
+    await resolveHold(linear, hold, documentId);
     return true;
   } catch (error) {
     if (!refusesComment(error)) throw error;
@@ -426,7 +448,7 @@ function withHold(entry: IdEntry, hold: HoldNotice, document?: LinearDocument): 
   return { ...entry, saved: { ...saved, hold } };
 }
 
-/** The number of documents whose suspended mark or comment changed: each may cost two Linear requests (I9). */
+/** The number of documents whose suspended mark or comment changed (I9). */
 export function holdChanges(result: HoldMarksResult | undefined): number {
   return result === undefined ? 0 : result.set.length + result.updated.length + result.cleared.length + (result.unresolved?.length ?? 0);
 }
