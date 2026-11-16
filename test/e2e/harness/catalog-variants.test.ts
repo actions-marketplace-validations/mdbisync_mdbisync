@@ -5,7 +5,9 @@ import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 import type { RunContext } from './context.ts';
 import { DOCUMENTS, runOnFakeServices } from './fake-services.ts';
-import { commentsWithState, imagePlace, isImageNotice, noticeImageLabels, placeLabel, withoutImage } from './image-gate.ts';
+import { commentsWithState, destinationKind, imageGateRecord, imagePlace, isImageNotice, noticeImageLabels, placeLabel, withoutImage, writtenImagePath } from './image-gate.ts';
+import { renderRunMarkdown } from './report.ts';
+import { resultOf } from './runner.ts';
 import { INIT_FILES, initArguments, initRelease, readmeBody, withoutAnnotation } from './init-files.ts';
 import { loadScenarios } from './spec.ts';
 import { STEP_ACTIONS } from './steps.ts';
@@ -13,6 +15,7 @@ import { REQUIRED_SETUP_CHECKS, subjectSource } from './subjects.ts';
 import { MINIMUM_RELEASE } from '../../../src/init/releases.ts';
 import { IMAGE_BLOCKED_COMMENT } from '../../../src/sync/marks.ts';
 import { fixText } from '../../../src/format/index.ts';
+import { LinearClient } from '../../../src/linear/index.ts';
 
 const scenario = (id: string) => {
   const found = loadScenarios().find((s) => s.id === id);
@@ -93,6 +96,59 @@ describe('the API-path image gate', () => {
     assert.equal(withoutImage(body, 'x2'), null);
   });
 
+  it('names the kind of destination Linear stored, never the destination', () => {
+    const written = writtenImagePath('x1');
+    assert.equal(written, '../images/plan-x1.png');
+    assert.equal(destinationKind(written, written), 'relative-path');
+    assert.equal(destinationKind('https://uploads.linear.app/c/d/plan.png?signature=s', written), 'upload');
+    // A path Linear changed or emptied is not the path kept.
+    for (const other of ['images/plan-x1.png', '', '#', '/images/plan-x1.png', '//uploads.linear.app/c/d/plan.png', 'http://uploads.linear.app/c/d/plan.png', 'https://uploads.linear.app:8443/c/d/plan.png', 'https://example.com/plan.png', 'data:image/png;base64,AAAA']) {
+      assert.equal(destinationKind(other, written), 'other', other);
+    }
+  });
+
+  it('records an upload\'s HTTP status from the sync\'s own authenticated download, and keeps no URL', async () => {
+    const signed = 'https://uploads.linear.app/c/d/plan.png?signature=secret-signature';
+    const uploaded = body.replace('../images/plan-x1.png', signed);
+    const seen: Array<{ url: string; init: RequestInit | undefined }> = [];
+    const answering = (answer: () => Response) => new LinearClient({ token: 'app-token', fetch: (async (input: Parameters<typeof fetch>[0], init?: RequestInit) => {
+      seen.push({ url: String(input), init });
+      return answer();
+    }) as typeof fetch });
+    const dead = await imageGateRecord(answering(() => new Response('gone', { status: 404 })), uploaded, 'x1');
+    assert.deepEqual(dead, { storedDestination: 'upload', uploadStatus: 404 });
+    assert.doesNotMatch(JSON.stringify(dead), /uploads\.linear\.app|secret-signature/);
+    // The request the sync's download makes: the app's token, no redirect followed.
+    assert.equal(seen[0]?.url, signed);
+    assert.equal(seen[0]?.init?.redirect, 'manual');
+    assert.deepEqual(seen[0]?.init?.headers, { authorization: 'Bearer app-token' });
+    assert.deepEqual(await imageGateRecord(answering(() => new Response('png', { status: 200 })), uploaded, 'x1'), { storedDestination: 'upload', uploadStatus: 200 });
+    assert.deepEqual(await imageGateRecord(answering(() => { throw new Error(`fetch failed for ${signed}`); }), uploaded, 'x1'), { storedDestination: 'upload', uploadStatus: null });
+    // A kept path or another destination is not fetched.
+    seen.length = 0;
+    assert.deepEqual(await imageGateRecord(answering(() => new Response('', { status: 500 })), body, 'x1'), { storedDestination: 'relative-path' });
+    assert.deepEqual(await imageGateRecord(answering(() => new Response('', { status: 500 })), body.replace('../images/plan-x1.png', 'https://example.com/plan.png'), 'x1'), { storedDestination: 'other' });
+    assert.equal(await imageGateRecord(answering(() => new Response('', { status: 500 })), body, 'x2'), null);
+    assert.equal(seen.length, 0);
+  });
+
+  it('the run report shows the stored destination and the upload status', () => {
+    const base = { level: 'L2', slice: 'mini', mode: 'local', result: 'pass' as const, startedAt: '', durationMs: 0, engineRequests: 0, harnessRequests: 0, harnessAppRequests: 0, budgetWaitMs: 0, checks: [], cleanup: { ok: true } };
+    const report = (results: Parameters<typeof renderRunMarkdown>[0]['results']) => renderRunMarkdown({ harnessRunId: 'r', startedAt: '', finishedAt: '', host: 'test', selection: {}, results });
+    const markdown = report([
+      { ...base, id: 'L2-42', runId: 'a1b2c3', imageGate: { storedDestination: 'upload', uploadStatus: 404 } },
+      { ...base, id: 'L2-42', runId: 'd4e5f6', imageGate: { storedDestination: 'relative-path' } },
+      { ...base, id: 'L2-42', runId: '0a0b0c', imageGate: { storedDestination: 'upload', uploadStatus: null } },
+      { ...base, id: 'L1-01', runId: '111111' },
+    ]);
+    assert.match(markdown, /## Image gate/);
+    assert.match(markdown, /\| L2-42 \| a1b2c3 \| upload \| 404 \|/);
+    assert.match(markdown, /\| L2-42 \| d4e5f6 \| relative-path \| n\/a \|/);
+    assert.match(markdown, /\| L2-42 \| 0a0b0c \| upload \| request failed \|/);
+    assert.doesNotMatch(markdown, /\| L1-01 \| 111111 \| (upload|relative-path|other) \|/);
+    assert.doesNotMatch(report([{ ...base, id: 'L1-01', runId: '111111' }]), /Image gate/);
+  });
+
   it('L2-42: an uploaded image reaches git; a written path blocks its document with the notice line, which clears after the fix', { timeout: 240_000 }, async (t) => {
     let blockedComments: string[] = [];
     const outcomes = await runOnFakeServices(t, scenario('L2-42'), DOCUMENTS, {
@@ -105,10 +161,38 @@ describe('the API-path image gate', () => {
         // The first target is the document the upload went into.
         const notices = (await commentsWithState(ctx.live!.app, ctx.observations.get('target.id') as string)).filter((comment) => isImageNotice(comment.body));
         assert.deepEqual(notices, [], 'the uploaded image\'s document got no image notice');
+        // The fake keeps the written path; the report names its kind, never the path.
+        assert.deepEqual(resultOf(ctx, { result: 'pass' }, { startedAt: 0, budgetWaitMs: 0, checks: [], cleanup: { ok: true } }).imageGate, { storedDestination: 'relative-path' });
       },
     });
     allHold(outcomes, [...INVARIANTS, 'tracked.uploadedImage', 'blocked.icon', 'blocked.color', 'blocked.imageLines', 'blocked.openImageNotices', 'blocked.marksRestored', 'tracked.body', 'pullRequests.lintFindings']);
     assert.equal(blockedComments.filter(isImageNotice).length, 1, 'one image notice before the fix');
+  });
+
+  it('L2-42 where Linear turns the written path into an upload that answers 404: the report names the upload and the status', { timeout: 240_000 }, async (t) => {
+    const dead = 'https://uploads.linear.app/fake-workspace/plan-dead.png';
+    let downloads = 0;
+    const outcomes = await runOnFakeServices(t, scenario('L2-42'), DOCUMENTS, {
+      intercept: (url, init) => {
+        // Linear stores an upload of its own in place of the written path, as it did in some live runs.
+        if (typeof init?.body === 'string' && /\.\.\/images\/plan-/.test(init.body)) init.body = init.body.replace(/\.\.\/images\/plan-[a-z0-9-]+\.png/g, dead);
+        if (url === dead) {
+          downloads += 1;
+          return new Response('', { status: 404 });
+        }
+        return undefined;
+      },
+      inspect: async (ctx: RunContext) => {
+        const record = ctx.observations.get('imageGate.record');
+        assert.deepEqual(record, { storedDestination: 'upload', uploadStatus: 404 });
+        const result = resultOf(ctx, { result: 'pass' }, { startedAt: 0, budgetWaitMs: 0, checks: [], cleanup: { ok: true } });
+        assert.deepEqual(result.imageGate, { storedDestination: 'upload', uploadStatus: 404 });
+        assert.doesNotMatch(JSON.stringify(result), /fake-workspace/, 'the result keeps no upload URL');
+      },
+    });
+    // The sync downloaded it too and blocked the document; the fix clears it.
+    assert.ok(downloads >= 2, 'the sync and the harness both requested the upload');
+    allHold(outcomes, ['blocked.icon', 'blocked.color', 'blocked.imageLines', 'blocked.openImageNotices', 'blocked.marksRestored']);
   });
 
   it('L2-42 without the fix: the notice stays open and the marks stay, so the clear subjects fail', { timeout: 240_000 }, async (t) => {

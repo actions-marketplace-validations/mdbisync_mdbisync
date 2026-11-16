@@ -7,6 +7,7 @@
 // result being checked. The notice line is read back from Linear's comments.
 import { line, parse, visit } from '../../../src/format/markdown.ts';
 import type { LinearClient } from '../../../src/linear/index.ts';
+import { isUpload } from '../../../src/sync/assets.ts';
 import { IMAGE_BLOCKED_COMMENT } from '../../../src/sync/marks.ts';
 
 /** An image's place among a document's images and its Markdown line, as a notice names it. */
@@ -45,6 +46,56 @@ export function imagePlace(text: string, token: string): (ImagePlace & { url: st
   if (index === -1) return null;
   const found = images[index]!;
   return { image: index + 1, total: images.length, line: found.line, url: found.url };
+}
+
+/**
+ * What Linear stored where the harness wrote a relative image path: that
+ * path kept as written, an upload of Linear's own, or something else (a
+ * changed or emptied path, another host). Only the kind is kept, never the
+ * destination: an upload URL is signed.
+ */
+export type StoredDestination = 'relative-path' | 'upload' | 'other';
+
+/** Where the blocked image points in the text the sync read, and for an upload, the HTTP status it answers. */
+export interface ImageGateRecord {
+  storedDestination: StoredDestination;
+  /**
+   * The HTTP status of the same authenticated GET the sync's download makes; null when the request failed.
+   * The status alone: the sync's size and type checks on the body are not applied.
+   */
+  uploadStatus?: number | null;
+}
+
+/** The relative image path the `linear.image-path` step writes. */
+export function writtenImagePath(token: string): string {
+  return `../images/plan-${token}.png`;
+}
+
+/** The kind of `url`, an image destination Linear stored where the harness wrote `written`. */
+export function destinationKind(url: string, written: string): StoredDestination {
+  if (isUpload(url)) return 'upload';
+  return url === written ? 'relative-path' : 'other';
+}
+
+/**
+ * The record of the blocked image whose alt text holds `token` in `text`.
+ * For an upload, the app fetches it as the sync does (its transport's
+ * authenticated upload GET, redirects not followed) and keeps the status
+ * alone. Null when the image is not in the text.
+ */
+export async function imageGateRecord(app: Pick<LinearClient, 'transport'>, text: string, token: string): Promise<ImageGateRecord | null> {
+  const place = imagePlace(text, token);
+  if (place === null) return null;
+  const storedDestination = destinationKind(place.url, writtenImagePath(token));
+  if (storedDestination !== 'upload') return { storedDestination };
+  try {
+    const response = await app.transport.fetchUpload(place.url, { signal: AbortSignal.timeout(30_000) });
+    await response.body?.cancel().catch(() => {});
+    return { storedDestination, uploadStatus: response.status };
+  } catch {
+    // The error could quote the URL: only that the request failed is kept.
+    return { storedDestination, uploadStatus: null };
+  }
 }
 
 /** The label a notice gives an image: `Image N of M (line L)`. */
