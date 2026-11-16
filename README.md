@@ -143,7 +143,12 @@ models (Fable and Astra) and by GitHub CodeQL, whose results are in the
 [dependency scan](https://mdbisync.com/security/dependencies). The image
 counts the open findings of severity high and critical for each; the release
 report also lists every dismissed finding with its reason and the risks we
-accept.
+accept. The dependency scan runs again every six hours on the latest release,
+so its count follows advisories published after the release; the advisories it
+excepts are listed with their reasons in
+[`security/dependency-exceptions.json`](security/dependency-exceptions.json).
+Each release also carries an SPDX SBOM of its bundled packages
+(`sbom.spdx.json`).
 
 <p align="center">
   <a href="https://mdbisync.com/security/report">
