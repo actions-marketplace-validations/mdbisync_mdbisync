@@ -1,6 +1,6 @@
 // The suspended lane keeps its own merge bases: normal merges carry the
 // failed batch's history with its tree set aside, so topology is insufficient.
-import { checkedPullView } from './pull-repairs.ts';
+import { checkedPullView, type RepairGate } from './pull-repairs.ts';
 import { randomUUID } from 'node:crypto';
 import { splitFile } from '../format/index.ts';
 import { findFileLinks } from '../initial-sync/uploads.ts';
@@ -69,7 +69,11 @@ export interface LaneOptions {
   requiredChecks?: readonly RequiredCheck[] | undefined;
   /** A head with no checks at all may merge. */
   mergeWithoutChecks?: boolean | undefined;
+  /** Answers whether the hooks pass a stored repair's text. */
+  security: RepairGate;
 }
+
+const treeOf = (git: Git, commit: Oid) => git.text(['rev-parse', `${commit}^{tree}`]);
 
 export class LaneMoved extends Error {}
 export class LaneConflict extends Error {
@@ -230,7 +234,7 @@ export async function maintainSuspended(context: RunContext, options: LaneOption
     if (previous === null || await isAncestor(git, previous, tracked)) return undefined;
     for (const path of await changedPaths(git, tracked, previous)) paths.add(path);
   }
-  const view = await checkedPullView(git, linear, ids, context.mapping.zones, options.identity ?? context.identity, paths);
+  const view = await checkedPullView(git, linear, ids, context.mapping.zones, options.identity ?? context.identity, options.security, previous ?? tracked, paths);
   const intake = view.commit;
   let head = previous;
   let bases: { tracked: Oid; linear: Oid; view?: Oid };
@@ -254,7 +258,8 @@ export async function maintainSuspended(context: RunContext, options: LaneOption
     // Discover documents a person's/CI's changes on this branch added to the batch.
     for (const path of await changedPaths(git, tracked, head)) paths.add(path);
     await addEpisodes(context, options, ids, paths, []);
-    if (bases.linear !== linear) {
+    // A repair the hooks pass after the lane took in its observation changes the view, not the Linear ref.
+    if (bases.linear !== linear || await treeOf(git, intake) !== await treeOf(git, bases.view ?? bases.linear)) {
       await includeCapturedAssets(git, intake, ids, paths);
       // The intake never carries paths outside this lane. Mask them before
       // the merge, so their unrelated image/config conflicts cannot hold it.
@@ -396,7 +401,7 @@ export async function suspendBatch(context: RunContext, options: LaneOptions, fa
   const paths = new Set(await changedPaths(git, tracked, batchTree));
   // The batch's own paths, before the lane's earlier ones join them: its failure describes only these.
   const batchPaths = [...paths].sort();
-  const view = await checkedPullView(git, linear, ids, context.mapping.zones, options.identity ?? context.identity, paths);
+  const view = await checkedPullView(git, linear, ids, context.mapping.zones, options.identity ?? context.identity, options.security, failed, paths);
   const intake = view.commit;
   const previous = context.fetched.suspended ?? null;
   let head: Oid;
