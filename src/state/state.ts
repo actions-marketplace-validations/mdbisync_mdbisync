@@ -446,12 +446,49 @@ export async function isAncestor(git: Git, commit: Oid, of: Oid): Promise<boolea
  * its parent's tree needed no pull request, so it never waits.
  */
 export async function initialPullRequestPending(git: Git, state: { linear: Oid | null; tracked: Oid }): Promise<boolean> {
+  return (await pendingInitialRecord(git, state)) !== null;
+}
+
+/**
+ * The newest initial record from Linear that `linear` holds and the tracked
+ * branch has not merged, when it changed its parent's tree; otherwise null.
+ * See `pendingInitialRecords`.
+ */
+export async function pendingInitialRecord(git: Git, state: { linear: Oid | null; tracked: Oid }): Promise<Oid | null> {
+  return (await pendingInitialRecords(git, state))[0] ?? null;
+}
+
+/**
+ * The initial records from Linear that `linear` holds and the tracked branch
+ * has not merged, and that changed their parent's tree, newest first. They are
+ * found by their place in the history, not by the tip's subject: anyone who
+ * may push can add commits to the state refs, so every commit after a record
+ * is read, whoever wrote it. Only a merge into the tracked branch, or a new
+ * initial sync (whose record starts again from the tracked branch), takes a
+ * record out of that history.
+ */
+export async function pendingInitialRecords(git: Git, state: { linear: Oid | null; tracked: Oid }): Promise<Oid[]> {
   const { linear, tracked } = state;
-  if (linear === null) return false;
-  const [subject] = (await git.text(['show', '-s', '--format=%s', linear])).split('\n');
-  if (subject !== INITIAL_SYNC_FROM_LINEAR_RECORD) return false;
-  if (await isAncestor(git, linear, tracked)) return false;
-  return initialRecordChangesParent(git, linear);
+  if (linear === null) return [];
+  const records: Oid[] = [];
+  for (const record of await unmergedInitialRecords(git, linear, tracked)) {
+    if (await initialRecordChangesParent(git, record)) records.push(record);
+  }
+  return records;
+}
+
+/**
+ * The initial records from Linear in the history of `head`, on every parent,
+ * that neither the tracked branch nor any of `excluded` holds, newest first.
+ */
+export async function unmergedInitialRecords(git: Git, head: Oid, tracked: Oid, excluded: readonly Oid[] = []): Promise<Oid[]> {
+  const log = await git.text(['log', '--format=%H %s', '--fixed-strings', `--grep=${INITIAL_SYNC_FROM_LINEAR_RECORD}`, head, '--not', tracked, ...excluded]);
+  const records: Oid[] = [];
+  for (const line of log.split('\n')) {
+    const space = line.indexOf(' ');
+    if (space > 0 && line.slice(space + 1) === INITIAL_SYNC_FROM_LINEAR_RECORD) records.push(line.slice(0, space));
+  }
+  return records;
 }
 
 /** A parentless initial record also needs a person's approval. */
