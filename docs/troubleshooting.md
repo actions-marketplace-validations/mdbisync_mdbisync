@@ -320,7 +320,7 @@ the reason is fixed. The summaries list each with its rules:
 | `upload-too-large` | The document links a file over Linear's 10 MB upload limit. | Make the file smaller, or link it from somewhere else. |
 | `upload-unreadable` | The document links a file the run cannot read, such as an LFS object stored with LFS extensions or one the LFS server does not have. | Store the file in git or plain LFS, or push its LFS object. For a new document left out after a confirmed missing object (404/410), also commit an edit to the document or linked file to retry it. |
 | `image-blocked` | From Linear: an uploaded file cannot be read, is over 10 MB, redirects or has unsupported bytes; or a new ordinary link names a repository file other than a Markdown document by its relative path. The file keeps the tracked branch's text. | Upload the files in Linear instead of linking them. The first sync after the initial sync (once its pull request, if any, is merged) marks the document and comments which images to fix. |
-| `download-failed` | From Linear: a file the document embeds could not be downloaded this time (a network error, Linear's rate limit or a server error) or placed next to it. The file keeps the tracked branch's text. | Nothing; the next sync reads the document again. If it repeats, check the run's log for the asset error. |
+| `download-failed` | From Linear: a file the document embeds could not be downloaded this time (a network error, Linear's rate limit or a server error) or placed in its `assets/` folder. The file keeps the tracked branch's text. | Nothing; the next sync reads the document again. If it repeats, check the run's log for the asset error. |
 | `security-hook` | From Linear: a hook marked `alias: security` flagged the document's text or a file it embeds. In an initial sync, that text can hold the Linear URL of a linked document that was left out. The file keeps the tracked branch's text. | Remove what the hook flagged from the document in Linear, or bring in the linked document. |
 | `security-unchecked` | From Linear: the security hooks did not see this text, because their step did not run or the tracked branch moved after it. | Nothing; the next run checks it. If it repeats, check that the hooks step runs. |
 | `title-not-a-path` | From Linear: the file the document's title names would map to a different document, for example because it lands in a folder another annotation owns. | Rename the document in Linear. |
@@ -334,9 +334,9 @@ The `linear-format` hook's rules leave a file out too until it is fixed:
 `footnote`, `subscript`, `table-escaped-pipe`, `table-hash-cell`,
 `image-in-link`, `table-alignment`, `link-title`, `image-title`,
 `code-in-emphasis`, `hard-break-backslash`, `git-conflict-marker`,
-`url-in-html`, `block-first-in-list-item`, `image-not-in-repository` and
-`image-file-missing`. Each is described, with its fix, in
-[linear-format.md](linear-format.md#lint-rules).
+`url-in-html`, `block-first-in-list-item`, `image-not-in-repository`,
+`image-file-missing` and `document-in-assets-folder`. Each is described,
+with its fix, in [linear-format.md](linear-format.md#lint-rules).
 
 `mdbisync lint` run on a folder also reports `upload-file-refused` for a
 file an earlier sync captured from Linear (named `<sha256>.<ext>`) that the
@@ -446,7 +446,7 @@ the message. Most come from the workflow's configuration:
 | --- | --- |
 | `run init at the repository root` | Run it in the folder that holds `.git`. |
 | `provide --folder with --team and/or --project` | Name at least one folder, each with a team or project. |
-| `unknown option: <flag>`, `<flag> needs a value`, `<flag> must follow --folder`, `<flag> was given twice for a folder`, `<flag> was given twice`, `choose security hooks once` | Fix the flags; `mdbisync init --help` lists them. |
+| `unknown option: <flag>`, `<flag> needs a value`, `<flag> must follow --folder`, `<flag> was given twice for a folder`, `<flag> was given twice`, `choose security hooks once`, `choose Git LFS once` | Fix the flags; `mdbisync init --help` lists them. |
 | `--release-sha must be a full 40-character commit SHA`, `--release-version must be a version such as v1.2.3` | Give the release commit SHA and version (see [usage.md](usage.md#release-builds-and-pins)). |
 | `release <version> is older than <minimum>, the release these workflows are written for and checked against. Use <minimum> or later` | Pick `<minimum>` or a later release (see [`init`](configuration.md#init)): the workflows pass action inputs that the older release lacks. |
 | `paths must stay inside the repository`, `setup destinations must not contain symlinks`, `a setup folder path names a regular file` | Give folder paths inside the repository, without symbolic links. |

@@ -462,11 +462,26 @@ Markdown files and do not. Files with other names came through git and are
 not checked. The sync never removes or rewrites the file itself.
 
 ```text
-docs/0e5751c026e543b2e8ab2eb06099daa1d1e5df47778f7787faab45cdf12fe3a8.svg:1: upload-file-refused: …
+docs/assets/0e5751c026e543b2e8ab2eb06099daa1d1e5df47778f7787faab45cdf12fe3a8.svg:1: upload-file-refused: …
 ```
 
 Instead, remove the file, or replace it with a file the check admits, and
 change the documents that link it.
+
+### `document-in-assets-folder`
+
+A Markdown document cannot be inside a folder named assets, which holds the
+files documents embed. The sync writes each file it takes from Linear into
+an `assets/` folder beside the document that embeds it, and a repository's
+`**/assets/**` line in `.gitattributes` can store that whole folder in Git
+LFS, so a document there would not stay text. The name is matched exactly:
+`Assets` or `old-assets` is an ordinary folder.
+
+```text
+guides/assets/notes.md
+```
+
+Instead, move the document out of the `assets` folder.
 
 ## Install the hook
 

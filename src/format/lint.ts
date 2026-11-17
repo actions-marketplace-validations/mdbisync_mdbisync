@@ -5,6 +5,7 @@
 
 import type { Definition, Root } from 'mdast';
 import { CONTENT_LIMIT, LINT_RULES, type Finding, type LintRule } from './rules.ts';
+import { ASSETS_FOLDER } from '../sync/upload-type.ts';
 import { allowedLink, MarkdownLimitError, end, line, lineCount, parse, resolveTarget, splitFile, start, visit } from './markdown.ts';
 
 const GIT_MARKER = /^ {0,3}(?:<{7}|>{7})(?: |$)/;
@@ -55,6 +56,7 @@ export function lintText(file: string, text: string, options: LintOptions = {}):
     if (findings.some((f) => f.rule === rule && f.line === bodyLine + offset)) return;
     findings.push({ file, line: bodyLine + offset, rule, message: LINT_RULES[rule] });
   };
+  if (inAssetsFolder(file)) report('document-in-assets-folder', 1);
   const content = body.replace(/\r\n?/g, '\n');
   if ([...content].length > CONTENT_LIMIT) report('content-too-long', 1);
   let tree: Root;
@@ -186,6 +188,15 @@ function imageProblem(file: string, url: string, options: LintOptions): LintRule
   if (/\.md$/i.test(target)) return 'image-file-missing';
   if (options.linkedFileExists !== undefined && !options.linkedFileExists(url)) return 'image-file-missing';
   return undefined;
+}
+
+/**
+ * Whether a document lies inside a folder named `assets`, where the sync
+ * writes the files the documents of the folder above embed. The name is
+ * matched exactly, as the folder line of `.gitattributes` matches it.
+ */
+export function inAssetsFolder(file: string): boolean {
+  return file.split(/[\\/]/).slice(0, -1).includes(ASSETS_FOLDER);
 }
 
 /** Paths whose document titles collide: same path apart from case or Unicode normalization. */

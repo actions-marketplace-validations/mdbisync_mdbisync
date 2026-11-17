@@ -22,6 +22,7 @@ export const LINT_RULES = {
   'image-not-in-repository': 'An image must be a relative path to a file of the repository, not a URL, an absolute path or a path outside it.',
   'image-file-missing': 'An image must name a file that exists in the repository, not a folder or a Markdown document.',
   'upload-file-refused': 'A file named as the sync names a captured upload fails the upload check: documents that link it are blocked when they change in Linear.',
+  'document-in-assets-folder': 'A Markdown document cannot be inside a folder named assets, which holds the files documents embed.',
 } as const;
 
 export type LintRule = keyof typeof LINT_RULES;
