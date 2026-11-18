@@ -11,7 +11,7 @@ import { checkMappingBudget, mapTree } from '../mapping/mapping.ts';
 import { resolveTargets } from '../setup/linear.ts';
 import { nearestZone, folderOf } from '../mapping/annotations.ts';
 import { MAPPING_FILE_BYTES, MAPPING_TREE_BYTES, MappingBlobBudget, readableBlob } from '../mapping/blobs.ts';
-import { joinFile, lintInTree, sameMarkdown, splitFile } from '../format/index.ts';
+import { fixLinearText, joinFile, lintInTree, sameMarkdown, splitFile } from '../format/index.ts';
 import { type LinearDocument, type StopReason, LinearError, LinearStoppedError, describeLinearError, isTransientLinearError } from '../linear/index.ts';
 import { renderStop } from '../run/stop.ts';
 import { documentUrlBase, linksFromLinear, linksLinearDocuments, linksToLinear, workspaceUrlKey, type LinkSpellings } from '../initial-sync/links.ts';
@@ -384,7 +384,7 @@ export async function capture(context: RunContext, options: CaptureOptions): Pro
     }
     const linkBase = needsLinkBase ? documentUrlBase(await workspaceUrlKey(linear)) : undefined;
     const downloadAssets = createAssetCapture(git, options.config, base, options.fetch ?? ((input, init) => linear.transport.fetchUpload(String(input), init)), linear.transport.reads, spool, undefined, uploadAccessProbe(linear));
-    type Candidate = { doc: LinearDocument; path: string; head: string; previousBody?: string; assets: CapturedAssets; files: Map<string, FileContent>; checked?: string; observed?: string; compared?: { body: string; same: boolean } };
+    type Candidate = { doc: LinearDocument; path: string; head: string; previousBody?: string; assets: CapturedAssets; files: Map<string, FileContent>; checked?: string; observed?: string; compared?: { body: string; text: string } };
     const candidates = new Map<string, Candidate>();
     // A rejected target links to its accepted file, if it has one.
     const resetTargets = (rejected: ReadonlySet<string>, targets: Map<string, string>) => {
@@ -495,14 +495,16 @@ export async function capture(context: RunContext, options: CaptureOptions): Pro
         if (candidate.previousBody !== undefined) linksToLinear(candidate.previousBody, candidate.path, map, seen);
         body = linksFromLinear(body, candidate.path, map, seen);
       }
-      // Linear's own spelling of the same document is no change: keep the file's text.
+      // Linear's own spelling of the same document is no change: keep the file's text, also when its files are
+      // downloaded again (the same Markdown links the same paths). A change of spelling alone would read as an edit
+      // in Linear. A changed document is written in the form the `linear-format` hook leaves as it is.
       // Compared again only when other link targets change the body.
       if (candidate.compared?.body !== body) {
-        const {assets} = candidate;
-        const newAssets = assets.files.size > 0 || [...assets.uploads].some(([hash, url]) => uploads.get(hash) !== url);
-        candidate.compared = {body, same: candidate.previousBody !== undefined && !newAssets && sameMarkdown(candidate.previousBody, body)};
+        const unchanged = candidate.previousBody !== undefined && sameMarkdown(candidate.previousBody, body);
+        const text = unchanged ? joinFile(candidate.head, candidate.previousBody!) : fixLinearText(joinFile(candidate.head, body), candidate.doc.content ?? '');
+        candidate.compared = {body, text};
       }
-      return joinFile(candidate.head, candidate.compared.same ? candidate.previousBody! : body);
+      return candidate.compared.text;
     };
     let again = true;
     while (again) {

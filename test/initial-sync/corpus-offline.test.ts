@@ -250,11 +250,11 @@ describe('confirmed initial sync from Linear over the generated corpus (offline)
         const byPath = (path: string) => world.linear.documents.find((d) => d.id === seeded[path]?.id) as FakeDocument;
         const edited = pages[0] as string;
         const trashed = pages.at(-1) as string;
-        byPath(edited).content = 'Rewritten in Linear.\n';
+        byPath(edited).content = 'Rewritten in Linear.';
         byPath(trashed).trashed = true;
         const home = byPath(edited);
         const place = home.projectId !== undefined ? { projectId: home.projectId } : { teamId: home.teamId as string };
-        world.linear.documents.push({ id: 'doc-linear-only', title: 'from-linear/new-page', ...place, createdAt: '2026-03-01T00:00:00Z', content: 'Only in Linear.\n' });
+        world.linear.documents.push({ id: 'doc-linear-only', title: 'from-linear/new-page', ...place, createdAt: '2026-03-01T00:00:00Z', content: 'Only in Linear.' });
         for (const store of ['linear', 'ids', 'uploads']) await fixture.remote.run(['update-ref', '-d', `refs/mdbisync/${store}`]);
         const documents = structuredClone(world.linear.documents);
         const writes = world.linear.writes.count;

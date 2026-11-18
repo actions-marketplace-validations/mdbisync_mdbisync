@@ -920,6 +920,18 @@ describe('sync: the tracked branch to Linear', () => {
   });
 
   it('a renamed project folder needs no write, and the id map follows the files', async () => {
+    // The folder's files in the form the repository's linear-format hook keeps: the capture after the move writes the
+    // same text, so the move opens no pull request and the next edit merges without a conflict. Linear holds the same
+    // Markdown: no write.
+    const notes = Object.keys(TREE).filter((path) => path.startsWith('eng/notes/'));
+    await commit(Object.fromEntries(notes.map((path) => [path, fixText(TREE[path]!)])));
+    assert.deepEqual((await sync()).writes, []);
+    // Linear stores no final newline either.
+    for (const path of notes) {
+      const id = (await ids())[path]?.id;
+      const document = world.linear.documents.find((d) => d.id === id);
+      if (document?.content !== undefined) document.content = document.content.replace(/\n+$/, '');
+    }
     const before = await documentOf('eng/notes/review.md');
     await commit({}, [['eng/notes', 'eng/fieldnotes']]);
     const first = await sync();
@@ -928,7 +940,7 @@ describe('sync: the tracked branch to Linear', () => {
     assert.equal((await ids())['eng/fieldnotes/review.md']?.id, before.id);
     assert.equal((await ids())['eng/notes/review.md'], undefined);
     // The next edit writes the same document; nothing is trashed or created.
-    await commit({ 'eng/fieldnotes/review.md': `# Review\n\nLater edit. ${CANARY}\n` });
+    await commit({ 'eng/fieldnotes/review.md': `# Review\n\nLater edit. ${CANARY}` });
     const second = await sync();
     // Before its README came, eng/fieldnotes/ had the team place of eng/: that counts as a move, so its record also
     // goes to the tracked branch, in a pull request that changes no file.
@@ -1149,6 +1161,20 @@ describe('sync: the tracked branch to Linear', () => {
       if (concurrentEdit) assert.equal(figure.content, edited);
     });
   }
+
+  it('a file removed in git trashes its document when Linear only re-spells it and its files are downloaded again', async () => {
+    const path = 'eng/notes/figure.md';
+    const figure = await documentOf(path);
+    // Linear's spelling of the same document (a heading with trailing spaces, which `fix` trims), and no upload cache.
+    figure.content = (figure.content ?? '').replace('# Figure', '# Figure  ');
+    touch(figure);
+    await fixture.remote.run(['update-ref', '-d', 'refs/mdbisync/uploads']);
+    await commit({[path]: null});
+    const {result, report} = await sync();
+    assert.equal(result.exitCode, 0, result.stderr);
+    assert.deepEqual(report.sync?.decided, []);
+    assert.equal(figure.trashed, true);
+  });
 
   it('a write Linear rejects is listed, and the run exits to be run again', async () => {
     world.linear.writes.reject = (operation) => operation === 'UpdateDocument';

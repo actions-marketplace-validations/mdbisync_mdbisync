@@ -9,7 +9,7 @@ describe('image repairs through the sync pull request', () => {
     const path = 'eng/notes/plan.md';
     const url = status === undefined ? 'https://example.com/chart.png' : 'https://uploads.linear.app/chart.png';
     const body = `# Plan\n\n![Chart](${url})\n`;
-    const expected = `# Plan\n\n[Chart](<${url}>)\n`;
+    const expected = `# Plan\n\n[Chart](<${url}>)`;
     const network = fakeFetch(h.world);
     let downloads = 0;
     h.fetchOverride = async (input, init) => {
@@ -56,7 +56,7 @@ describe('image repairs through the sync pull request', () => {
     assert.match(branch, /!\[Kept\]\(assets\/[a-f0-9]+\.png\)/);
     assert.match(branch, /\[Relative\]\(<missing.png>\)/);
     assert.match(branch, /\[Absolute\]\(<\/missing.png>\)/);
-    assert.match(branch, /\[Nested\]\(https:\/\/example.com\/guide\)/);
+    assert.match(branch, /\[Nested\]\(<https:\/\/example.com\/guide>\)/);
     assert.doesNotMatch(branch, /data:|javascript:|!\[\]\(\)/);
     assert.equal((h.world.github.pullRequests[0]!.body!.match(/image \d of 7 \(line/g) ?? []).length, 6);
     await h.settle();
