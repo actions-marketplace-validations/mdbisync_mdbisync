@@ -5,9 +5,11 @@
 // step of their own that holds none of them.
 
 import assert from 'node:assert/strict';
+import { spawnSync } from 'node:child_process';
 import { readdirSync, readFileSync } from 'node:fs';
 import { describe, it } from 'node:test';
 import { parse } from 'yaml';
+import initWorkflows from '../../src/init/workflows.json' with { type: 'json' };
 
 const EXAMPLES = new URL('../../examples/', import.meta.url);
 const read = (file: string) => readFileSync(new URL(file, EXAMPLES), 'utf8');
@@ -31,7 +33,7 @@ interface Workflow {
   on: Record<string, unknown>;
   permissions?: unknown;
   concurrency?: { group?: string; 'cancel-in-progress'?: boolean };
-  jobs: Record<string, { steps: Step[]; permissions?: unknown }>;
+  jobs: Record<string, { steps: Step[]; permissions?: unknown; environment?: unknown }>;
 }
 
 const workflow = (file: string) => parse(read(file)) as Workflow;
@@ -50,6 +52,28 @@ const hooksStep = (file: string) => {
 };
 
 describe('workflow templates', () => {
+  it('declares the mdbisync environment on every job that references a sync secret', () => {
+    const examples = readdirSync(EXAMPLES).filter((file) => /\.ya?ml$/.test(file));
+    const copies = [
+      ['examples', Object.fromEntries(examples.map((file) => [file, read(file)]))],
+      ['src/init/workflows.json', initWorkflows],
+    ] as const;
+    const syncSecret = /\bsecrets\s*(?:\.\s*|\[\s*['"])(?:MDBISYNC_APP_PRIVATE_KEY|MDBISYNC_LINEAR_CLIENT_ID|MDBISYNC_LINEAR_CLIENT_SECRET)\b/i;
+    for (const [source, workflows] of copies) {
+      for (const file of SYNC_TEMPLATES) assert.ok(Object.hasOwn(workflows, file), `${source}: ${file} is missing`);
+      for (const [file, text] of Object.entries(workflows)) {
+        const jobs = Object.entries((parse(text) as Workflow).jobs);
+        const secretJobs = jobs.filter(([, job]) => syncSecret.test(JSON.stringify(job).replaceAll('\\"', '"')));
+        if (SYNC_TEMPLATES.includes(file)) {
+          assert.ok(secretJobs.length > 0, `${source}: ${file} has no sync secret references`);
+        }
+        for (const [name, job] of secretJobs) {
+          assert.equal(job.environment, 'mdbisync', `${source}: ${file} job ${name} must use the mdbisync environment`);
+        }
+      }
+    }
+  });
+
   it('every template in examples/ pins each action to a full commit with its version beside it', () => {
     const files = readdirSync(EXAMPLES).filter((file) => file.endsWith('.yml'));
     for (const name of SYNC_TEMPLATES) assert.ok(files.includes(name), `${name} is missing`);
@@ -109,8 +133,9 @@ describe('workflow templates', () => {
       });
 
       it('refuses any branch but main, then mints the GitHub App token and checks out without stored credentials', () => {
-        const [guard, token, checkout] = steps(file);
+        const [guard, variables, token, checkout] = steps(file);
         assert.equal(guard?.name, 'Refuse a branch other than main');
+        assert.equal(variables?.name, 'Check sync variables');
         assert.equal(token?.uses, APP_TOKEN);
         assert.equal(token?.id, 'app-token');
         assert.deepEqual(token?.with, { 'client-id': '${{ vars.MDBISYNC_APP_CLIENT_ID }}', 'private-key': '${{ secrets.MDBISYNC_APP_PRIVATE_KEY }}' });
@@ -121,13 +146,32 @@ describe('workflow templates', () => {
         assert.equal(checkout?.with?.['token'], '${{ steps.app-token.outputs.token }}');
       });
 
+      it('names an unset or blank GitHub Actions variable before requesting the App token', () => {
+        const check = steps(file).find((step) => step.name === 'Check sync variables');
+        assert.deepEqual(check?.env, {
+          MDBISYNC_APP_CLIENT_ID: '${{ vars.MDBISYNC_APP_CLIENT_ID }}',
+          MDBISYNC_LINEAR_CLIENT_ID: '${{ vars.MDBISYNC_LINEAR_CLIENT_ID }}',
+        });
+        assert.ok(check?.run);
+        const good = { MDBISYNC_APP_CLIENT_ID: 'app-id', MDBISYNC_LINEAR_CLIENT_ID: 'linear-id' };
+        const run = (env: NodeJS.ProcessEnv) => spawnSync('bash', ['-e', '-c', check.run!], { encoding: 'utf8', env });
+        assert.equal(run(good).status, 0);
+        for (const name of Object.keys(good)) {
+          for (const value of [undefined, '', ' \t']) {
+            const result = run({ ...good, [name]: value });
+            assert.equal(result.status, 1, result.stderr);
+            assert.equal(result.stdout, `::error::Set the ${name} GitHub Actions variable.\n`);
+          }
+        }
+      });
+
       it('stops before the App token expires', () => {
         for (const job of Object.values(workflow(file).jobs) as Array<{ 'timeout-minutes'?: number }>) {
           assert.ok(typeof job['timeout-minutes'] === 'number' && job['timeout-minutes'] < 60, `${file}: timeout-minutes`);
         }
       });
 
-      it('gives the App token to checkout and mdbisync, and the Linear secrets to mdbisync only', () => {
+      it('gives the App token to checkout and mdbisync and the Linear secret to mdbisync only', () => {
         const actions = actionSteps(file);
         assert.equal(actions[0].with?.['cleanup-tokens'], false);
         assert.equal(actions[1].with?.['cleanup-tokens'], undefined);
@@ -135,7 +179,7 @@ describe('workflow templates', () => {
           assert.equal(action.with?.['github-token'], '${{ steps.app-token.outputs.token }}');
           // The App's slug from the step that minted its token, so the sync's commits name the App.
           assert.equal(action.with?.['app-slug'], '${{ steps.app-token.outputs.app-slug }}');
-          assert.equal(action.with?.['linear-client-id'], '${{ secrets.MDBISYNC_LINEAR_CLIENT_ID }}');
+          assert.equal(action.with?.['linear-client-id'], '${{ vars.MDBISYNC_LINEAR_CLIENT_ID }}');
           assert.equal(action.with?.['linear-client-secret'], '${{ secrets.MDBISYNC_LINEAR_CLIENT_SECRET }}');
           // The same inputs in both steps, so the apply step runs the operation the stage step staged.
           const { 'security-step': _stage, 'cleanup-tokens': _cleanup, ...same } = actions[0].with ?? {};
@@ -146,7 +190,8 @@ describe('workflow templates', () => {
           if (step.uses?.startsWith(ACTION)) continue;
           const text = JSON.stringify(step);
           const label = step.name ?? step.uses ?? 'a step';
-          assert.ok(!/secrets\.MDBISYNC_LINEAR/.test(text), `${file}: ${label} sees the Linear secrets`);
+          assert.ok(!/secrets\.MDBISYNC_LINEAR/.test(text), `${file}: ${label} sees the Linear secret`);
+          if (step.name !== 'Check sync variables') assert.ok(!/vars\.MDBISYNC_LINEAR_CLIENT_ID/.test(text), `${file}: ${label} sees the Linear client ID`);
           if (step.uses !== CHECKOUT) assert.ok(!/steps\.app-token/.test(text), `${file}: ${label} sees the App token`);
         }
       });

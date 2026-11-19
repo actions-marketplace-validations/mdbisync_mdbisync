@@ -1,7 +1,7 @@
 // The workflow templates of `examples/`, as a deployer copies them, made
 // fit for one run in the shared sandbox (actions mode). Only what a run's
 // isolation needs changes: the run's branches, state refs and concurrency
-// group, the sandbox's runner, its secret and variable names, the release
+// group, the sandbox's runner and repository settings, the release
 // under test, and an artifact that carries the engine's report back to the
 // harness. A template with no trigger on the run's branch also gets the push
 // trigger that registers it, with its jobs guarded to run only on a dispatch
@@ -38,14 +38,11 @@ export function workflowFor(command: CommandName): string {
 /** The action's repository in the templates' `uses:`. */
 export const ACTION_REPOSITORY = 'mdbisync/mdbisync';
 
-/** The templates' secret and variable names, and the sandbox's. */
-export const SANDBOX_NAMES: Readonly<Record<string, string>> = {
-  'vars.MDBISYNC_APP_CLIENT_ID': 'vars.SYNC_APP_CLIENT_ID',
-  'vars.MDBISYNC_CI_WORKFLOWS': 'vars.SYNC_CI_WORKFLOWS',
-  'secrets.MDBISYNC_APP_PRIVATE_KEY': 'secrets.SYNC_APP_PRIVATE_KEY',
-  'secrets.MDBISYNC_LINEAR_CLIENT_ID': 'secrets.LINEAR_TEST_APP_CLIENT_ID',
-  'secrets.MDBISYNC_LINEAR_CLIENT_SECRET': 'secrets.LINEAR_TEST_APP_CLIENT_SECRET',
-};
+/** The template settings provided to sandbox workflows at repository level. */
+export const SANDBOX_WORKFLOW_SETTINGS = {
+  vars: ['MDBISYNC_APP_CLIENT_ID', 'MDBISYNC_LINEAR_CLIENT_ID', 'MDBISYNC_CI_WORKFLOWS'],
+  secrets: ['MDBISYNC_APP_PRIVATE_KEY', 'MDBISYNC_LINEAR_CLIENT_SECRET'],
+} satisfies Record<string, readonly string[]>;
 
 export const SANDBOX_RUNNER = ['self-hosted', 'mdbisync-sandbox'];
 
@@ -101,12 +98,11 @@ export const BRANCH_GUARD_STEP = 'Refuse a branch other than main';
 
 /** A template rendered for one run. */
 export function renderForRun(template: string, options: RunWorkflowOptions): string {
-  let text = template;
-  for (const [ours, theirs] of Object.entries(SANDBOX_NAMES)) text = text.split(ours).join(theirs);
-  const leftover = /\b(?:vars|secrets)\.MDBISYNC_[A-Z0-9_]+/.exec(text);
-  if (leftover !== null) throw new Error(`no sandbox name for ${leftover[0]}`);
-
-  const doc = parseDocument(text);
+  for (const [reference, context, name] of template.matchAll(/\b(vars|secrets)\.(MDBISYNC_[A-Z0-9_]+)\b/g)) {
+    const known = SANDBOX_WORKFLOW_SETTINGS[context as keyof typeof SANDBOX_WORKFLOW_SETTINGS];
+    if (!known.includes(name as string)) throw new Error(`no sandbox setting for ${reference}`);
+  }
+  const doc = parseDocument(template);
   const on = doc.get('on') as YAMLMap | undefined;
   for (const event of ['push', 'pull_request']) {
     if (on?.has(event) !== true) continue;
@@ -334,7 +330,7 @@ function patchSteps(doc: Document, job: YAMLMap, options: RunWorkflowOptions): v
     const stage = steps.items.find(isAction) as YAMLMap;
     const [linearSecret, appToken] = CANARY_SECRET_INPUTS;
     stage.setIn(['env', 'NODE_OPTIONS'], `--import \"\${{ github.workspace }}/${CANARY_TOKEN_OBSERVER_FILE}\"`);
-    stage.setIn(['env', linearSecret], `\${{ ${SANDBOX_NAMES['secrets.MDBISYNC_LINEAR_CLIENT_SECRET']} }}`);
+    stage.setIn(['env', linearSecret], '${{ secrets.MDBISYNC_LINEAR_CLIENT_SECRET }}');
     stage.setIn(['env', appToken], '${{ steps.app-token.outputs.token }}');
   }
   // The stage step runs before the hooks step; the last action step is the one whose report the harness reads.

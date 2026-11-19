@@ -13,9 +13,9 @@
 # - linear-to-git: one pull request removes the synchronized files that have
 #   no document; a person reviews and merges it.
 #
-# Needs: the repository variable MDBISYNC_APP_CLIENT_ID and the secrets
-# MDBISYNC_APP_PRIVATE_KEY (the sync's GitHub App), MDBISYNC_LINEAR_CLIENT_ID
-# and MDBISYNC_LINEAR_CLIENT_SECRET (the Linear OAuth app).
+# Needs: repository variables MDBISYNC_APP_CLIENT_ID and MDBISYNC_LINEAR_CLIENT_ID.
+# In the mdbisync environment limited to the tracked branch, set
+# MDBISYNC_APP_PRIVATE_KEY and MDBISYNC_LINEAR_CLIENT_SECRET.
 name: mdbisync initial sync
 
 on:
@@ -43,6 +43,7 @@ concurrency:
 jobs:
   initial-sync:
     runs-on: ubuntu-latest
+    environment: mdbisync
     # The App token lives one hour. A longer initial sync stops here; start
     # the workflow again with the same inputs and it goes on where it stopped.
     timeout-minutes: 55
@@ -65,6 +66,18 @@ jobs:
             echo "::error::Run this workflow on $BRANCH, not on $GITHUB_REF."
             exit 1
           fi
+      - name: Check sync variables
+        shell: bash
+        env:
+          MDBISYNC_APP_CLIENT_ID: ${{ vars.MDBISYNC_APP_CLIENT_ID }}
+          MDBISYNC_LINEAR_CLIENT_ID: ${{ vars.MDBISYNC_LINEAR_CLIENT_ID }}
+        run: |
+          for name in MDBISYNC_APP_CLIENT_ID MDBISYNC_LINEAR_CLIENT_ID; do
+            if [[ ! ${!name} =~ [^[:space:]] ]]; then
+              printf '::error::Set the %s GitHub Actions variable.\n' "$name"
+              exit 1
+            fi
+          done
       - name: Get the GitHub App token
         id: app-token
         uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3.3.0
@@ -169,7 +182,7 @@ jobs:
           confirm: ${{ inputs.confirm }}
           github-token: ${{ steps.app-token.outputs.token }}
           app-slug: ${{ steps.app-token.outputs.app-slug }}
-          linear-client-id: ${{ secrets.MDBISYNC_LINEAR_CLIENT_ID }}
+          linear-client-id: ${{ vars.MDBISYNC_LINEAR_CLIENT_ID }}
           linear-client-secret: ${{ secrets.MDBISYNC_LINEAR_CLIENT_SECRET }}
       # The security hooks in a step of their own: it holds no Linear secret
       # or token and no App token. Give it only the keys your hooks need.
@@ -193,5 +206,5 @@ jobs:
           confirm: ${{ inputs.confirm }}
           github-token: ${{ steps.app-token.outputs.token }}
           app-slug: ${{ steps.app-token.outputs.app-slug }}
-          linear-client-id: ${{ secrets.MDBISYNC_LINEAR_CLIENT_ID }}
+          linear-client-id: ${{ vars.MDBISYNC_LINEAR_CLIENT_ID }}
           linear-client-secret: ${{ secrets.MDBISYNC_LINEAR_CLIENT_SECRET }}
