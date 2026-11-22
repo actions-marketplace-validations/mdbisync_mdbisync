@@ -18,27 +18,26 @@ The engine requires Node.js 24.2 or later and [Git 2.40 or later](https://github
 
 ## Generate repository files
 
+The [quickstart](quickstart.md#repository-files) copies the workflows and
+adds the hook by hand. `mdbisync init` does that file work in one command.
 Run the released CLI at your repository root, through `npm exec` as the
-[quickstart](quickstart.md#repository-files) shows (the commands below
-write `mdbisync` for short). Supply the full release commit SHA used by the
-action and hook, plus the folders to synchronize:
+[quickstart](quickstart.md#or-with-one-command-init) shows (the commands
+below write `mdbisync` for short), with the full release commit SHA used by
+the action and hook:
 
 ```sh
 mdbisync init --release-sha <release-sha> --release-version vX.Y.Z \
-  --folder notes --team ENG \
-  --folder notes/planning --project "Field notes" \
   --no-security-hooks
 ```
 
-`--folder` starts a folder's options; its `--team` and `--project` names
-apply only to that folder. A project can inherit a team from an ancestor.
 `--release-version` is an optional workflow comment; the SHA determines
-what runs. The command writes both sync workflows and `pre-commit.yml`,
-adds the required `linear-format` hook with that same SHA, and annotates
-the folders' `README.md` files. It preserves their bodies and other front
-matter, and keeps custom hooks. Identical files are left unchanged on a
-rerun. Conflicting workflows, annotations or hook pins cause an error
-before any file is written; reconcile those files before retrying.
+what runs. The command writes both sync workflows and `pre-commit.yml`
+and adds the required `linear-format` hook with that same SHA, keeping
+custom hooks. Commit `mdbisync.yml` only after the initial sync. Folder
+annotations are yours to write ([folder mapping](#folder-mapping)).
+Identical files are left unchanged on a rerun. Conflicting workflows or
+hook pins cause an error before any file is written; reconcile those files
+before retrying.
 
 Use `--security-hooks` for two optional examples marked `alias: security`:
 Gitleaks in a Docker image pinned by version and SHA-256 digest, and a
@@ -56,15 +55,39 @@ release generated, add `--ignore-gitleaks-allow` before the final ` .`
 of its `entry`; `init` does this itself when the repository's other
 files match the release it is run with.
 
-Use `--lfs` to store embedded files in Git LFS: `init` adds to
-`.gitattributes` a line for each image and document type the sync takes
-from Linear, for files you commit anywhere, and
-`**/assets/** filter=lfs diff=lfs merge=lfs -text`, so every file the
-sync writes into an `assets/` folder goes to LFS whatever its extension.
-The line covers every folder named `assets`, including a website's own;
-if one must stay out of LFS, write your own lines instead. Lines already
-there are kept. Without `--lfs`, your own `.gitattributes`
-decides, as for any commit.
+Use `--lfs` to add the [Git LFS](#git-lfs) lines to `.gitattributes`.
+Lines already there are kept.
+
+Flags work without a terminal. With a terminal attached, `init` asks for
+missing setup choices. It changes local files only and prints the remaining
+setup steps. See `mdbisync init --help` for the flags.
+
+## Git LFS
+
+To store images and files in Git LFS, install Git LFS, run
+`git lfs install`, and add these lines to the repository's
+`.gitattributes` (`mdbisync init --lfs` adds the same lines):
+
+```text
+*.png filter=lfs diff=lfs merge=lfs -text
+*.jpg filter=lfs diff=lfs merge=lfs -text
+*.jpeg filter=lfs diff=lfs merge=lfs -text
+*.gif filter=lfs diff=lfs merge=lfs -text
+*.webp filter=lfs diff=lfs merge=lfs -text
+*.avif filter=lfs diff=lfs merge=lfs -text
+*.pdf filter=lfs diff=lfs merge=lfs -text
+*.mp4 filter=lfs diff=lfs merge=lfs -text
+*.webm filter=lfs diff=lfs merge=lfs -text
+*.svg filter=lfs diff=lfs merge=lfs -text
+**/assets/** filter=lfs diff=lfs merge=lfs -text
+```
+
+The lines by extension cover each type the sync takes from Linear, for
+files you commit anywhere. The last line sends every file the sync writes
+into an `assets/` folder to LFS, whatever its extension. It covers every
+folder named `assets`, including a website's own; if one must stay out of
+LFS, write narrower lines instead. Without such lines, your own
+`.gitattributes` decides, as for any commit.
 
 The sync uploads and reads LFS objects where git-lfs would for the tracked
 branch: git's own configuration (`lfs.url`, `lfs.pushurl`,
@@ -72,11 +95,6 @@ branch: git's own configuration (`lfs.url`, `lfs.pushurl`,
 tracked branch's `.lfsconfig`, then the remote's URL. The `.lfsconfig` of
 the branch a run happens to check out is not read, so another branch
 cannot send the attachments to a server of its choosing.
-
-Flags work without a terminal. With a terminal attached, `init` asks for
-missing setup choices. It changes local files only and prints the remaining
-admin steps: apps, secrets, merge commits, local hook installation and the
-first initial-sync dry run. See `mdbisync init --help` for the flags.
 
 ## Folder mapping
 
@@ -119,28 +137,28 @@ variables: `MDBISYNC_LINEAR_CLIENT_ID` for `linear-client-id`, and so on
 
 ## Workflows
 
-`init` writes the workflow templates of [examples/](../examples/) into
-`.github/workflows/`, pinned to your release. To copy them by hand instead,
-replace each `mdbisync/mdbisync@…` pin with your release SHA:
+The workflow templates are in [examples/](../examples/). Copy them into
+`.github/workflows/`, each `mdbisync/mdbisync@…` pin naming your release
+SHA, or let [`init`](#generate-repository-files) write them:
 
 - `mdbisync-initial-sync.yml` runs the initial sync by hand from the Actions
   tab, with a `direction` and a `confirm` box (unchecked: a dry run).
-- `mdbisync.yml` runs the sync on every push to `main`, on GitHub's schedule
-  (every five minutes asked for) and by hand. GitHub runs schedules only on
-  the default branch, may start them hours late or skip them, and turns them
-  off in a public repository after 60 days without activity, so start it
-  from your own timer as well and keep the schedule as a fallback ([own
-  scheduler](own-scheduler.md)). Until the initial sync has run, each sync
-  run writes nothing and fails with `initial-sync-required`.
+- `mdbisync.yml` runs the sync on every push to `main` and through
+  `workflow_dispatch`: by hand, or from [your own scheduler](own-scheduler.md)
+  to pick up Linear edits between pushes. Add it after the initial sync:
+  before that, each sync run writes nothing and fails with
+  `initial-sync-required`.
+- `pre-commit.yml` runs the hooks on every pull request, the sync's
+  included ([in CI](linear-format.md#in-ci)).
 
-Both share the concurrency group `mdbisync`, so runs of one repository never
+The two sync workflows share the concurrency group `mdbisync`, so runs of one repository never
 overlap. GitHub keeps one pending run per group and a newer one replaces it,
-so a sync queued behind a running one can replace a pending initial sync:
-disable the sync workflow and stop your own timer before you start an
-initial sync, and enable and start them again when the initial sync has
+so a sync queued behind a running one can replace a pending initial sync.
+Before a later initial sync (recovery), disable the sync workflow and stop
+your own timer, and enable and start them again when the initial sync has
 finished.
 
-Both install `pre-commit`, which the repository's security hooks need on
+The two sync workflows install `pre-commit`, which the repository's security hooks need on
 content from Linear (a workflow of your own must install it before the
 mdbisync step; without it the run stops and marks no document as a security
 failure), and run the hooks in a step of their own, between two
@@ -490,7 +508,7 @@ copy of the templates from `main` pins the newest release whose pull
 request has merged. Once they pin a final release, a pre-release leaves
 them as they are, and so does a release older than the one they pin.
 
-A final version such as `v0.1.0` is built the same way, but only after a
+A final version such as `v1.0.0` is built the same way, but only after a
 security gate passes. The gate refuses the build unless the source commit
 has a `security-gate` commit status of `success` posted by the GitHub App
 bot user whose id the workflow sets in `SECURITY_GATE_CREATOR_ID` (only the
@@ -571,6 +589,11 @@ git ls-remote https://github.com/mdbisync/mdbisync 'refs/tags/v0.1.0-rc.9^{}'
 discover these release commits on `releases`. Keep the hook on an explicitly
 resolved release SHA when updating it.
 
+A release can also change the workflow templates in `examples/`. Your
+workflows are copies of them, so a new pin does not bring those changes: when
+you update, compare your workflows with the new release's templates and apply
+their changes, keeping your own settings.
+
 The action's bundles include third-party packages under their own licenses;
 every release commit ships their license texts and notices in
 `dist/THIRD_PARTY_NOTICES.txt`.
@@ -612,16 +635,16 @@ by design.
 To check a final release you need the GitHub CLI 2.68 or newer, signed in
 (`gh auth login`; the attestation lookup needs a token even for this public
 repository), `jq`, and `sha256sum` (`shasum -a 256` on macOS). The commands
-use `v0.1.0` as the example version.
+use `v1.0.0` as the example version.
 
 1. Check out the release without line-ending conversion, so the files keep
    the exact bytes that were signed, and read its source commit from the
    tag message (`Source: <sha>`):
 
    ```sh
-   git clone -c core.autocrlf=false --branch v0.1.0 --depth 1 https://github.com/mdbisync/mdbisync mdbisync-v0.1.0
-   cd mdbisync-v0.1.0
-   git cat-file -p v0.1.0 | grep '^Source: '
+   git clone -c core.autocrlf=false --branch v1.0.0 --depth 1 https://github.com/mdbisync/mdbisync mdbisync-v1.0.0
+   cd mdbisync-v1.0.0
+   git cat-file -p v1.0.0 | grep '^Source: '
    ```
 
 2. Verify the build provenance, then check every file of the checkout
@@ -651,7 +674,7 @@ use `v0.1.0` as the example version.
      --source-ref refs/heads/main --source-digest <source-sha> \
      --predicate-type https://spdx.dev/Document/v2.3 \
      --format json > ../sbom-attestation.json &&
-   gh release download v0.1.0 --repo mdbisync/mdbisync --pattern sbom.spdx.json --dir .. &&
+   gh release download v1.0.0 --repo mdbisync/mdbisync --pattern sbom.spdx.json --dir .. &&
    jq -e --slurpfile sbom ../sbom.spdx.json \
      'any(.[]; .verificationResult.statement.predicate == $sbom[0])' ../sbom-attestation.json
    ```

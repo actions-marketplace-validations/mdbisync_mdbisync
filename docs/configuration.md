@@ -9,7 +9,7 @@ row.
 ## Action inputs
 
 The inputs of `uses: mdbisync/mdbisync@<release-sha>`, under `with:`. The
-workflows `init` writes set the required ones; the rest keep their
+example workflows set the required ones; the rest keep their
 defaults until you add them. The command line reads the same inputs from
 the environment variables in the third column; an input marked "action
 only" has no command-line form.
@@ -48,7 +48,7 @@ only" has no command-line form.
 
 ## Environment secrets and repository variables
 
-The workflows `init` writes use the `mdbisync` environment. In Settings →
+The example workflows use the `mdbisync` environment. In Settings →
 Environments, set its deployment branches to **Selected branches and
 tags** with a single **Branch** rule for the tracked branch (`main` by
 default) and no required reviewers. Add the secrets below there. Set
@@ -129,7 +129,7 @@ The release's `dist/cli.js`, run as `mdbisync`, for example through
 
 | Command | What it does |
 | --- | --- |
-| `init` | Writes the workflows, the hook configuration and the folder annotations into the repository. |
+| `init` | Writes the workflows and the hook configuration into the repository, optionally with the security hook examples and the Git LFS lines; the quickstart does the same by hand. |
 | `check` | Runs the setup check alone, writing nothing. |
 | `initial-sync` | The initial sync; a dry run unless `MDBISYNC_CONFIRM=true`. |
 | `sync` | The two-way sync. |
@@ -150,9 +150,9 @@ environment variables; secrets never go in arguments.
 | `--lfs` | off | Adds to `.gitattributes` the Git LFS lines for embedded files: one per image and document type the sync takes from Linear (`*.png`, `*.jpg`, `*.jpeg`, `*.gif`, `*.webp`, `*.avif`, `*.pdf`, `*.mp4`, `*.webm`, `*.svg`) and `**/assets/** filter=lfs diff=lfs merge=lfs -text` for every `assets/` folder. That line covers every folder named `assets` in the repository, a website's own included; leave out `--lfs` and write your own lines if one must stay out of LFS. Lines already there are kept and not repeated. |
 | `--no-lfs` | on | Leaves `.gitattributes` as it is: your own attributes decide what goes to LFS. |
 
-With a terminal attached and the release SHA, a folder, or a folder's
-team or project missing, `init` asks for those, and then whether to add
-the security hook examples and the Git LFS lines. It changes local files only.
+With a terminal attached, `init` asks for the release SHA when it is
+missing, and whether to add the security hook examples and the Git LFS
+lines when their flags are missing. It changes local files only.
 
 The workflows `init` writes are made for the release their examples pin,
 `v0.1.0-rc.9`, and pass action inputs that earlier releases lack. `init`

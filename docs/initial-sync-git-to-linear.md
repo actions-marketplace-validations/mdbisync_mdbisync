@@ -36,12 +36,13 @@ instead ([initial-sync-linear-to-git.md](initial-sync-linear-to-git.md)).
 - Run the `linear-format` hook over the repository (`pre-commit run
   linear-format --all-files`) and commit its fixes. A file it cannot fix is
   left out of the run ([what is left out](#what-is-left-out)).
-- Disable the sync workflow (Actions → *mdbisync* → **⋯** → **Disable
-  workflow**), and stop your own dispatch timer if you run one
-  ([own scheduler](own-scheduler.md#stop-the-timer-during-an-initial-sync)),
-  until the initial sync has finished. Both workflows share one
-  queue, and a sync queued behind a running one can replace a waiting
-  initial sync.
+- Keep the sync workflow, `mdbisync.yml`, out of the repository until the
+  initial sync has finished. If it is already there (a later initial sync),
+  disable it (Actions → *mdbisync* → **⋯** → **Disable workflow**) and stop
+  your own dispatch timer if you run one
+  ([own scheduler](own-scheduler.md#stop-the-timer-during-an-initial-sync)).
+  Both workflows share one queue, and a sync queued behind a running one can
+  replace a waiting initial sync.
 - If documents in the synchronized teams and projects should survive, give
   each a file first, or move it to a team or project that no folder maps to.
 
@@ -140,7 +141,7 @@ reasons:
   the run cannot read (`upload-unreadable`), such as an LFS object the
   remote's LFS server does not have. The dry run judges a file in Git LFS by
   its pointer and asks the LFS server only whether it holds the object; it
-  downloads nothing.
+  downloads nothing;
 - a plain link to a repository file in a document Linear already holds, when
   the `linear` and `ids` state refs are lost (`link-provenance-unknown`):
   the run cannot tell it from a link a Linear member wrote.
@@ -243,7 +244,7 @@ artifact.
 ## A run that stops
 
 A large repository needs more than one run. Linear's rate limit stops a run
-before it runs out (`stopped`), and the job's time limit of 55 minutes, set
+before the limit runs out (`stopped`), and the job's time limit of 55 minutes, set
 by the GitHub App token's one-hour lifetime, ends one. When Linear fails or
 rejects a write, the run writes the rest but trashes nothing
 (`write-failed`). A state ref that another run moves under it ends it too
@@ -270,8 +271,8 @@ default), first. Closing the pull request alone is not enough
 ## After the initial sync
 
 1. Check a few documents in Linear: their text, images and links.
-2. Enable the sync workflow, and start your own dispatch timer if you run
-   one ([own scheduler](own-scheduler.md)). Its first run finds nothing to
+2. Add the sync workflow, or enable it again, and start your own dispatch
+   timer ([own scheduler](own-scheduler.md)). Its first run finds nothing to
    write, or opens a pull request with Linear's form of the files Linear
    reformatted.
 3. Fix the files left out, in git; the sync takes each in once it passes.

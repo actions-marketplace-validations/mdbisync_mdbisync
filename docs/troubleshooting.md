@@ -48,7 +48,7 @@ step with the bare message, without `error:`.
 | Last line | Meaning and what to do |
 | --- | --- |
 | `<command>: stopped before any write (<code>): <detail>` | The setup check, or the sync's state, stopped the run before it wrote anything. The code is one of the [setup check codes](#setup-check) or [sync state codes](#sync-state). When the quickstart has a section that fixes it, the line ends with `. How to fix it: <link>`. |
-| `warning: <command>: partial, will continue (<code>)` | A sync run did part of its work and recorded what it finished. The next scheduled run goes on from there; nothing to do unless it repeats. See [Partial sync runs](#partial-sync-runs). |
+| `warning: <command>: partial, will continue (<code>)` | A sync run did part of its work and recorded what it finished. The next sync run goes on from there; nothing to do unless it repeats. See [Partial sync runs](#partial-sync-runs). |
 | `<command>: stopped by Linear before any write; run it again once the limit has reset` | Linear's rate limit stopped an initial sync or a check before it wrote anything. Wait for the reset time in the job summary and run it again. |
 | `<command>: stopped before any write (container-cap); reduce additions or check document-cap` | See [`container-cap`](#container-cap). |
 | `<command>: not finished (<code>); run it again with the same inputs` | An initial sync stopped part way. Run it again with the same direction and `confirm`; it skips what it already did. See [Initial sync](#initial-sync). |
@@ -200,8 +200,8 @@ other documents continue through **Changes from Linear** on
 are pending before the deadline, the normal lane waits to merge.
 
 Suspended documents show a red exclamation mark (`Alert`) and one comment
-naming the failed check and linking to its run when available, with annotations for that
-file, or “did not finish in time”. Later failures edit that comment.
+naming the failed check and linking to its run when available, with the check's
+annotations for that file, or “did not finish in time”. Later failures edit that comment.
 A blocked security-hook mark takes precedence over suspension, which
 takes precedence over conflict. Suspended documents are frozen both ways:
 Linear edits go only to the suspended lane; git edits wait for release.
@@ -277,7 +277,7 @@ instead of creating it twice.
 | --- | --- | --- |
 | `stopped` | Linear's rate limit stopped it. | Run it again after the reset time in the summary. |
 | `write-failed` | Linear failed or rejected a write; the **Failed** table names it. | Run it again; if the same document fails, look up its error. |
-| `state-moved` | A state ref moved while it worked: another run is working on this repository. | Wait for the other run, then run the initial sync again. Disable the sync workflow during an initial sync. |
+| `state-moved` | A state ref moved while it worked: another run is working on this repository. | Wait for the other run, then run the initial sync again. Keep the sync workflow out of the repository, or disabled, during an initial sync. |
 | `container-cap` | See [`container-cap`](#container-cap). | |
 | `pull-request-failed` | From Linear: the state is recorded, but the pull request could not be opened. | Run it again with the same inputs to open it. |
 | `sync-branch-changed` | From Linear: the sync branch holds commits this initial sync did not make, so it recorded nothing. | Merge or close the sync branch's pull request and delete the branch, then run it again. |
@@ -368,7 +368,7 @@ or replace the file
 
 External http(s) and path images, and image uploads answering 404 or 410,
 become ordinary links in the sync pull request. Empty and `data:` images are
-removed. The PR lists each image by place and line; after merge, the write
+removed. The pull request lists each image by place and line; after merge, the write
 step puts the repaired text into Linear. These repairs do not cause an
 `image-blocked` notice. Unsupported or oversized upload bytes remain blocked.
 A repaired text enters the pull request only after the repository's security
@@ -476,20 +476,14 @@ the message. Most come from the workflow's configuration:
 | Message | What to do |
 | --- | --- |
 | `run init at the repository root` | Run it in the folder that holds `.git`. |
-| `provide --folder with --team and/or --project` | Name at least one folder, each with a team or project. |
-| `unknown option: <flag>`, `<flag> needs a value`, `<flag> must follow --folder`, `<flag> was given twice for a folder`, `<flag> was given twice`, `choose security hooks once`, `choose Git LFS once` | Fix the flags; `mdbisync init --help` lists them. |
+| `unknown option: <flag>`, `<flag> needs a value`, `<flag> was given twice`, `choose security hooks once`, `choose Git LFS once` | Fix the flags; `mdbisync init --help` lists them. |
 | `--release-sha must be a full 40-character commit SHA`, `--release-version must be a version such as v1.2.3` | Give the release commit SHA and version (see [usage.md](usage.md#release-builds-and-pins)). |
 | `release <version> is older than <minimum>, the release these workflows are written for and checked against. Use <minimum> or later` | Pick `<minimum>` or a later release (see [`init`](configuration.md#init)): the workflows pass action inputs that the older release lacks. |
-| `paths must stay inside the repository`, `setup destinations must not contain symlinks`, `a setup folder path names a regular file` | Give folder paths inside the repository, without symbolic links. |
-| `conflicting folder options: <path>` | Give each folder its options once. |
-| `invalid YAML configuration`, `.pre-commit-config.yaml needs a repos list`, `invalid pre-commit repository entry` | Fix `.pre-commit-config.yaml` or the `README.md` front matter. |
-| `<folder>/README.md already has a different <key>` | Edit or remove that annotation first. |
+| `paths must stay inside the repository`, `setup destinations must not contain symlinks`, `a setup folder path names a regular file` | A file `init` writes (in `.github/workflows/`, `.pre-commit-config.yaml`, `.gitattributes`) or a folder on its path is a symbolic link, leads outside the repository, or is a regular file where a folder should be. Move it aside and run `init` again. |
+| `invalid YAML configuration`, `.pre-commit-config.yaml needs a repos list`, `invalid pre-commit repository entry` | Fix `.pre-commit-config.yaml`. |
 | `existing linear-format hook uses a different repository or release` | Update the hook's `rev` by hand to the release you pass, or pass the release it uses. |
 | `existing <hook> hook differs from the security example; reconcile it first` | Change or rename your hook, or leave out `--security-hooks`. |
 | `existing workflow differs: <name>` | Merge the changes into your workflow by hand, or move it aside. |
-
-An annotation problem from [Annotation problems](#annotation-problems) can
-also end `init`.
 
 ## Linear and GitHub request errors
 
