@@ -143,6 +143,25 @@ export class LinearReadBackError extends LinearError {
   }
 }
 
+/**
+ * A Linear answer went over a byte limit: one answer over the transport's
+ * `responseBytes`, given up while it was read and never parsed
+ * (`linear-response-too-large`), or an answer with document bodies that
+ * takes the run over its `bodyBytes` budget, refused before its bodies are
+ * kept (`linear-body-budget`). Not transient: the same content gives the
+ * same answer on the next run.
+ */
+export class LinearResponseLimitError extends LinearError {
+  readonly code: 'linear-response-too-large' | 'linear-body-budget';
+  readonly limit: number;
+
+  constructor(operation: string, code: 'linear-response-too-large' | 'linear-body-budget', limit: number) {
+    super(operation, message(code === 'linear-body-budget' ? 'linear.body-budget' : 'linear.response-too-large', { operation, bytes: limit }));
+    this.code = code;
+    this.limit = limit;
+  }
+}
+
 /** The file upload's PUT to storage failed. */
 export class LinearUploadError extends LinearError {}
 
