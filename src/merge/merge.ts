@@ -7,6 +7,8 @@ import { Git } from '../state/git.ts';
 import { detectConflicts, findMarkerLines, lines, lineText, markerCallout, MARKERS } from './markers.ts';
 import type { Conflict } from './markers.ts';
 import { message } from '../messages.ts';
+import { widenConflictRanges } from './conflict-ranges.ts';
+import type { Range, WideningRange } from './conflict-ranges.ts';
 
 export interface MergeResult {
   text: string;
@@ -15,7 +17,6 @@ export interface MergeResult {
 }
 
 type Token = { kind: 'line'; text: string } | { kind: 'conflict'; ours: string[]; theirs: string[] };
-type Range = { start: number; end: number };
 type Side = 'ours' | 'theirs';
 
 function tokenize(text: string, size: number): Token[] {
@@ -84,32 +85,12 @@ function blockRanges(tokens: Token[], side: Side): Range[] {
 }
 
 function conflictRanges(tokens: Token[]): Range[] {
-  const blocks = [...blockRanges(tokens, 'ours'), ...blockRanges(tokens, 'theirs')];
-  const ranges = tokens.flatMap((token, i) => token.kind === 'conflict' ? [{ start: i, end: i + 1 }] : []);
-  // Widen until both projections' blocks are complete; overlapping hunks then
-  // become a single conflict, including multiple changes inside an old marker set.
-  let changed: boolean;
-  do {
-    changed = false;
-    for (const range of ranges) {
-      for (const block of blocks) {
-        if (block.start < range.end && block.end > range.start) {
-          const start = Math.min(range.start, block.start);
-          const end = Math.max(range.end, block.end);
-          if (start !== range.start || end !== range.end) changed = true;
-          range.start = start;
-          range.end = end;
-        }
-      }
-    }
-  } while (changed);
-  const merged: Range[] = [];
-  for (const range of ranges.sort((a, b) => a.start - b.start)) {
-    const last = merged.at(-1);
-    if (last && range.start < last.end) last.end = Math.max(last.end, range.end);
-    else merged.push({ ...range });
-  }
-  return merged;
+  // Keep blocks whole in both versions, including existing conflict markers.
+  const ranges: WideningRange[] = [...blockRanges(tokens, 'ours'), ...blockRanges(tokens, 'theirs')];
+  tokens.forEach((token, i) => {
+    if (token.kind === 'conflict') ranges.push({ start: i, end: i + 1, conflict: true });
+  });
+  return widenConflictRanges(ranges);
 }
 
 /**
@@ -198,13 +179,14 @@ function closedHtmlBlock(value: string): boolean {
 function render(tokens: Token[], ranges: Range[], finalNewline: boolean): string {
   let text = '';
   let cursor = 0;
+  const lastOursIndex = tokens.findLastIndex((token) => content(token, 'ours').some((line) => line !== ''));
   const armsWithoutMarkers = { ours: withoutMarkers(tokens, 'ours'), theirs: withoutMarkers(tokens, 'theirs') };
   for (const range of ranges) {
     text += tokens.slice(cursor, range.start).map((token) => content(token, 'ours').join('')).join('');
     if (text && !text.endsWith('\n\n')) text += text.endsWith('\n') ? '\n' : '\n\n';
     const arms = (side: Side) => completeBlocks(armsWithoutMarkers[side].slice(range.start, range.end).flat().join('').replace(/^\n|\n$/g, ''));
     cursor = range.end;
-    const last = tokens.slice(cursor).every((token) => content(token, 'ours').join('') === '');
+    const last = cursor > lastOursIndex;
     text += `${markerCallout(MARKERS.git)}\n\n${arms('ours')}\n\n${markerCallout(MARKERS.linear)}\n\n${arms('theirs')}\n\n${markerCallout(MARKERS.end)}${last && !finalNewline ? '' : '\n'}`;
     const next = tokens[cursor];
     if (next?.kind === 'line' && lineText(next.text) !== '') text += '\n';
