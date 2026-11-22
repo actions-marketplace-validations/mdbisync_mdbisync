@@ -298,6 +298,11 @@ this time:
 
 None needs action unless the same document stays skipped.
 
+A document that exceeds a Markdown merge limit is also reported as `conflict`.
+If the document has no conflict markers, check both versions for very long
+runs of `<`, `=` or `>` and resolve the differences manually. The sync keeps
+both versions until the conflict is resolved.
+
 ## Decided by the conflict rules
 
 When a file and its document change on both sides in ways that cannot both
