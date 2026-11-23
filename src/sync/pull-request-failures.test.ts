@@ -1,6 +1,8 @@
 // Merge refusals, API outages, and pending initial-sync records across retries.
 
 import assert from 'node:assert/strict';
+import { rm, writeFile } from 'node:fs/promises';
+import { join } from 'node:path';
 import { INCOMPLETE_EXIT_CODE, NO_STATE_EXIT_CODE, SETUP_FAILED_EXIT_CODE } from '../commands.ts';
 import { INITIAL_SYNC_FROM_LINEAR_RECORD } from '../state/index.ts';
 import { describe, it } from 'node:test';
@@ -294,7 +296,8 @@ describe('sync: pull request failures', () => {
 
     const broken = await sync();
     assert.equal(broken.result.exitCode, INCOMPLETE_EXIT_CODE, broken.result.stderr);
-    assert.match(broken.result.stderr, /not finished \(github-failed\)/);
+    assert.match(broken.result.stderr, /partial, will continue \(github-failed\)/);
+    assert.equal(broken.report.exitStatus, 'warning');
     assert.equal(broken.report.pullRequest?.code, 'github-failed');
     assert.equal(broken.report.pullRequest?.status, undefined);
     assert.match(broken.summary, /A request to GitHub for the sync pull request got no answer/);
@@ -309,6 +312,56 @@ describe('sync: pull request failures', () => {
     assert.deepEqual(merged.writes, ['PUT /pulls/1/merge']);
     assert.match(await show('refs/heads/main:eng/notes/plan.md'), /After the outage\./);
     assert.match(await show('refs/heads/main:combined/guide.md'), /Written anyway\./);
+  });
+
+  it('a request GitHub refuses fails the run as a setup error, and the next run goes on once it is accepted', async () => {
+    await editInLinear('eng/notes/plan.md', `# Plan\n\nRefused at first. ${CANARY}\n`);
+    h.world.github.refusePullRequests = true;
+    const refused = await sync();
+    assert.equal(refused.result.exitCode, SETUP_FAILED_EXIT_CODE, refused.result.stderr);
+    assert.match(refused.result.stderr, /setup error \(github-failed\): GitHub refused a request for the sync pull request \(HTTP 422\)/);
+    assert.equal(refused.report.exitStatus, 'failure');
+    assert.equal(refused.report.pullRequest?.status, 422);
+    assert.match(refused.summary, /Setup error: GitHub refused a request for the sync pull request \(HTTP 422\)/);
+    h.world.github.refusePullRequests = false;
+    const opened = await sync();
+    assert.equal(opened.result.exitCode, 0, opened.result.stderr);
+    assert.deepEqual(opened.writes, ['POST /pulls']);
+  });
+
+  it('a 403 GitHub gives for its rate limit ends the run partial, not as a setup error', async () => {
+    await editInLinear('eng/notes/plan.md', `# Plan\n\nLimited at first. ${CANARY}\n`);
+    h.world.github.rateLimitPullRequests = true;
+    const limited = await sync();
+    assert.equal(limited.result.exitCode, INCOMPLETE_EXIT_CODE, limited.result.stderr);
+    assert.match(limited.result.stderr, /partial, will continue \(github-failed\)/);
+    assert.equal(limited.report.exitStatus, 'warning');
+    assert.equal(limited.report.pullRequest?.status, 403);
+    assert.equal(limited.report.pullRequest?.rateLimited, true);
+    assert.match(limited.summary, /GitHub limited the rate of a request for the sync pull request \(HTTP 403\); the next run tries again\./);
+    h.world.github.rateLimitPullRequests = false;
+    const opened = await sync();
+    assert.equal(opened.result.exitCode, 0, opened.result.stderr);
+    assert.deepEqual(opened.writes, ['POST /pulls']);
+  });
+
+  it('a push to the sync branch that a rule rejects fails the run as a setup error, not as a moved ref', async () => {
+    await editInLinear('eng/notes/plan.md', `# Plan\n\nFirst edit. ${CANARY}\n`);
+    await sync();
+    const hook = join(h.fixture.root, 'remote.git', 'hooks', 'pre-receive');
+    await writeFile(hook, `#!/bin/sh\nwhile read old new ref; do [ "$ref" = "${SYNC_BRANCH}" ] && { echo "push declined by rule" >&2; exit 1; }; done\nexit 0\n`, { mode: 0o755 });
+    await editInLinear('eng/notes/plan.md', `# Plan\n\nSecond edit. ${CANARY}\n`);
+    const rejected = await sync();
+    assert.equal(rejected.result.exitCode, SETUP_FAILED_EXIT_CODE, rejected.result.stderr);
+    assert.match(rejected.result.stderr, /setup error \(push-rejected\): GitHub refused the push to the sync branch/);
+    assert.equal(rejected.report.exitStatus, 'failure');
+    assert.equal(rejected.report.pullRequest?.code, 'push-rejected');
+    assert.match(rejected.summary, /Setup error: GitHub refused the push to the sync branch/);
+    await rm(hook);
+    let run = await sync();
+    if (run.report.pullRequest?.branchMoved === true) run = await sync();
+    assert.equal(run.result.exitCode, 0, run.result.stderr);
+    assert.match(await show('refs/heads/main:eng/notes/plan.md'), /Second edit\./);
   });
 
   it('an answer lost after GitHub opened or merged the sync pull request: the next run converges without a second one', async () => {
@@ -363,7 +416,7 @@ describe('sync: pull request failures', () => {
     assert.equal(((await documentOf('eng/notes/plan.md')).content ?? '').split('Server errors.').length, 2, 'and once in Linear');
   });
 
-  it('a GitHub server error on every request of the pull request step ends each run incomplete, and the next run converges', async () => {
+  it('a GitHub server error on every request of the pull request step ends each run partial, and the next run converges', async () => {
     await editInLinear('eng/notes/plan.md', `# Plan\n\nEvery server error. ${CANARY}\n`);
     await sync();
     const steps = ['GET /pulls', 'PATCH /pulls/1', 'GET /commits/', 'PUT /pulls/1/merge'];
@@ -375,7 +428,7 @@ describe('sync: pull request failures', () => {
       assert.equal(broken.result.exitCode, INCOMPLETE_EXIT_CODE, `${step}: ${broken.result.stderr}`);
       assert.equal(broken.report.pullRequest?.code, 'github-failed', step);
       assert.equal(broken.report.pullRequest?.status, 500, step);
-      assert.equal(broken.report.exitStatus, 'failure', step);
+      assert.equal(broken.report.exitStatus, 'warning', step);
     }
     delete h.world.github.serverError;
     let run = await sync();
@@ -400,7 +453,7 @@ describe('sync: pull request failures', () => {
       const broken = await sync();
       assert.equal(broken.result.exitCode, INCOMPLETE_EXIT_CODE, `${step}: ${broken.result.stderr}`);
       assert.equal(broken.report.pullRequest?.code, 'github-failed', step);
-      assert.equal(broken.report.exitStatus, 'failure', step);
+      assert.equal(broken.report.exitStatus, 'warning', step);
     }
     delete h.world.github.reset;
     let run = await sync();
