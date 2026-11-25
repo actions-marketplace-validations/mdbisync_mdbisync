@@ -282,8 +282,6 @@ describe('space references, adjacent links and lone backticks as Linear stores t
     ['also in a link label, at its edge too', 'x [&#32;a](https://a.test) and [b&#32;](https://a.test) y', 'x [ a](<https://a.test>) and [b ](<https://a.test>) y'],
     ['one at a mark\'s inner edge moves out of it', 'x **&#32;mid** y, *b&#32;* c and ~~&#32;d~~', 'x  **mid** y, *b*  c and  ~~d~~'],
     ['out of every mark around it', 'x ***&#32;both*** y', 'x  ***both*** y'],
-    ['one at a block\'s start or end goes', '&#32;Leading\n\n**&#32;Tip** one\n\nTail **bold&#32;**\n\nEnd&#32;', 'Leading\n\n**Tip** one\n\nTail **bold**\n\nEnd'],
-    ['also in an item, heading, quote and cell', '* &#32;item\n\n# **&#32;Head**\n\n> &#32;quote\n\n| Col |\n| --- |\n| &#32;cell |', '* item\n\n# **Head**\n\n> quote\n\n| Col |\n| -- |\n| cell |\n'],
     ['a continuation line keeps it before a word', 'first\n&#32;second\n**&#32;b** c', 'first\n second\n **b** c'],
     ['adjacent links to one destination become one', '[Shop](https://a.test)[More](https://a.test)[Last](https://a.test)', '[ShopMoreLast](<https://a.test>)'],
     ['with the marks around a part inside it', '[a](https://a.test)**[b](https://a.test)***[c](https://a.test)*~~[d](https://a.test)~~', '[a**b***c*~~d~~](<https://a.test>)'],
@@ -317,10 +315,30 @@ describe('space references, adjacent links and lone backticks as Linear stores t
 
   it('checks the space edits of a block together', () => {
     // Each edit alone keeps the paragraph; both would make it a heading.
-    const fixed = fixText('&#32;#&#32;heading');
-    assert.equal(fixed, '#&#32;heading');
+    const fixed = fixText('Intro\n&#32;#&#32;heading');
+    assert.equal(fixed, 'Intro\n #&#32;heading');
     assert.equal(parse(fixed).children[0]?.type, 'paragraph');
     assert.equal(fixText(fixed), fixed, 'a second fix changes nothing');
+  });
+
+  it('leaves a space reference at a block\'s start or end to the author', () => {
+    // Linear stores the space on its first write and drops it on the next:
+    // no form reads back the same in both, so lint reports it and fix stops.
+    const cases: Array<[string, number]> = [
+      ['&#32;Leading', 1], ['**&#32;Tip** one', 1], ['Intro\n\nTail **bold&#32;**', 3], ['End&#x20;', 1], ['&#32;', 1],
+      ['* &#32;item', 1], ['1. Plan\n   1. Pack the bags&#32;\n2. Next', 2], ['# **&#32;Head**', 1], ['> &#32;quote', 1],
+      ['Text ![leaf](leaf.png) **&#32; leaf**', 1], ['Tail \\\\&#32;', 1], ['**&#32;&#32;Seeds:** buy them\n\nMore', 1], ['Ask the host.\nBring the map.&#32;', 2],
+    ];
+    for (const [text, line] of cases) {
+      assert.deepEqual(lintText('doc.md', text).map((finding) => [finding.rule, finding.line]), [['space-reference-edge', line]], text);
+      assert.deepEqual(lintInTree('doc.md', text, new Set(['leaf.png'])), [], `the sync sends it: ${text}`);
+      assert.equal(fixText(text), text, text);
+    }
+    // Inside the text, at a line's start or end, it is no block edge.
+    // A table cell's edge is left to fix: Linear can end the table earlier than Markdown.
+    for (const text of ['first\n&#32;second', 'a&#32;\nb', 'x **&#32;mid** y', '[&#32;a](https://a.test) b', 'Tail \\&#32;', '\\&#32;Lead', '**\\&#32;Tip** one', 'Tail \\\\\\&#32;', '| Col |\n| --- |\n| cell |\nLine&#32;\nContinued']) {
+      assert.deepEqual(lintText('doc.md', text), [], text);
+    }
   });
 
   it('moves a space reference out of a mark at a line ending, as Linear does', () => {
@@ -632,6 +650,10 @@ describe('Linear bold forms', () => {
     ['spaces next to four-star boundaries', '**Note: ****important**** text**', '**Note: important** text'],
     ['adjacent stars that would expose a URL', '**https:****//example.test****end**', '**https:****//example.test****end**'],
     ['adjacent stars that would expose strikethrough', '**a~~****b~~****c**', '**a\\~\\~b\\~\\~c**'],
+    // An empty bold run first: Linear bolds the text up to the next `**` and leaves the rest plain.
+    ['an empty bold run before a bold run', '****Plan it**.**', '**Plan it**.'],
+    ['an empty bold run inside a paragraph', 'Intro ****Plan it**, more** end', 'Intro **Plan it**, more end'],
+    ['an empty bold run after literal stars', '**Lead ****Plan it**!**', '\\*\\*Lead **Plan it**!'],
     ['file label in a list item', '* **[Trail map](trail.pdf)**', '* [**Trail map**](<trail.pdf>)'],
     ['soft breaks', '**Birch\nCedar\nMaple**', '**Birch**\n**Cedar**\n**Maple**'],
     ['hard break', '**Birch  \nCedar**', '**Birch**  \n**Cedar**'],
@@ -768,12 +790,6 @@ describe('list boundaries as Linear writes them', () => {
       assert.deepEqual(readTree(fixed), readTree(input), 'Markdown reads the same document');
     });
   }
-  it('a list opening with a section keeps its blank line', () => {
-    // The section is written in Linear's form below an empty marker line, which must not follow the list's text.
-    const fixed = fixText('* Plan\n  1. one\n\n  * +++ \n\n    words\n\n    +++');
-    assert.equal(fixed, '* Plan\n  1. one\n\n  * \n\n    +++ \n\n    words\n\n    +++');
-    assert.equal(fixText(fixed), fixed, 'the result is a fixed point');
-  });
 });
 
 describe('a list Linear writes right below an item\'s text', () => {
@@ -1233,6 +1249,22 @@ describe('what fix leaves alone', () => {
       ['1. Trip\n\t1. \n\t\t1. step', '1. Trip\n    1\\. \n    \t1\\. step'],
       ['1. Trip\n\t1. \n\t\t2. step\n\t\t4. pack', '1. Trip\n    1\\. \n    \t2\\. step\n    \t4\\. pack'],
       ['1. Trip\n\t1. \n\t\t- step', '1. Trip\n    1\\. \n    \t- step'],
+      // A numbered line that is only its number is Linear's empty item, and
+      // one whose text starts with other marks is Linear's item too.
+      ['1. Trip\n\t1. \n\t2. **Tip**\n\t3. ', '1. Trip\n   1. \n   2. **Tip**\n   3. '],
+      ['1. Trip\n\t1. \n\t\t2.\n\t\t3.\t', '1. Trip\n   1. \n      2. \n      3. '],
+      ['1. Trip\n\t2. \n\t3. \n\t4. Pack', '1. Trip\n   2. \n   3. \n   4. Pack'],
+      ['1. Trip\n\t1. \n\t\t2. *soft* (step) `code` [Map](https://a.test)', '1. Trip\n   1. \n      2. *soft* (step) `code` [Map](<https://a.test>)'],
+      ['1. Pump\n\t1. \n\t2. Rinse:\u00a0 Fill it\u00a0', '1. Pump\n   1. \n   2. Rinse:\u00a0 Fill it\u00a0'],
+      // A heading, a quote, a checkbox or a section line there reads another way in Linear.
+      ['1. Trip\n\t1. \n\t\t2. +++ Notes', '1. Trip\n    1\\. \n    \t2\\. +++ Notes'],
+      ['1. Trip\n\t1. \n\t\t2. # Heading', '1. Trip\n    1\\. \n    \t2\\. # Heading'],
+      ['1. Trip\n\t1. \n\t\t2. > quoted', '1. Trip\n    1\\. \n    \t2\\. > quoted'],
+      // The item's text ends before Linear's empty item: Linear drops the spaces or tab there.
+      ['1. Plan 2 \n   1.', '1. Plan 2\n   1. '],
+      ['* Plan\t\n  *', '* Plan\n  * '],
+      ['1. Plan\n   1. Step 2 \n      1. ', '1. Plan\n   1. Step 2\n      1. '],
+      ['1. Plan 2 \n\t\t1. \n', '1. Plan 2\n   1. '],
       // Not when a line ending falls inside markup, a number has a leading
       // zero, a line is four columns past its content (code in Linear) or
       // the lines follow a hard break.
@@ -1252,6 +1284,34 @@ describe('what fix leaves alone', () => {
       assert.equal(fixText(fixed), fixed, `a second fix changes nothing: ${JSON.stringify(text)}`);
       assert.deepEqual(lintText('a.md', fixed), [], `lint finds nothing: ${JSON.stringify(text)}`);
     }
+  });
+
+  it('keeps the text form of a bare marker after a break or a space reference', () => {
+    // A two-space break is how a former backslash break is written: the line
+    // after it stays text in both runs. A space reference keeps its spelling.
+    for (const text of ['1. Plan 2  \n   1.', '1. Plan  \\\n   1.', '1. Plan&#32; \n   1.']) {
+      const fixed = fixText(text);
+      assert.equal(fixText(fixed), fixed, `a second fix changes nothing: ${JSON.stringify(text)}`);
+      assert.deepEqual(lintText('a.md', fixed), [], JSON.stringify(text));
+    }
+    assert.ok(fixText('1. Plan&#32; \n   1.').includes('&#32;'));
+  });
+
+  it('keeps the escaped form where numbered text is too deep to read by itself', () => {
+    const text = '1. Plan\n   1.\n   2. ' + '> '.repeat(128) + 'x';
+    assert.match(fixText(text), /2\\\. >/);
+  });
+
+  it('keeps a heading\'s hashes when an empty bold run starts it', () => {
+    const fixed = fixText('****Plan** Check #**\n===');
+    assert.ok(fixed.replace(/^# /, '').includes('#'), fixed);
+    assert.equal(fixText(fixed), fixed);
+  });
+
+  it('finds trailing spaces before a bare marker in linear time', () => {
+    const started = performance.now();
+    fixText('1. A' + ' '.repeat(50_000) + 'B\n   1.');
+    assert.ok(performance.now() - started < 2000);
   });
 
   it('keeps a literal asterisk before an image on an item\'s second line', () => {
@@ -1643,14 +1703,9 @@ describe('what fix leaves alone', () => {
       ['Plan\n   \\====', 'Plan\n   \\===='],
       ['Plan\n\\=\\=\\=', 'Plan\n\\=\\=\\='],
       ['* Plan\n  \\===', '* Plan\n  \\==='],
-      ['Plan\n  \\- spare', 'Plan\n  \\- spare'],
-      ['Plan\n  \\+ spare', 'Plan\n  \\+ spare'],
-      ['* Plan\n    \\- spare', '* Plan\n    \\- spare'],
       ['Plan\n\\-x spare', 'Plan\n\\-x spare'],
       ['Plan\n  \\---', 'Plan\n  \\---'],
       ['* Plan\n \\- spare', '* Plan\n  \\- spare'],
-      // A tab can span fewer columns under the shorter prefix fix writes.
-      ['-   Plan\n    \t\\- spare', '* Plan\n  \t\\- spare'],
       ['1.  Plan\n    \t\\=====', '1. Plan\n   \t\\====='],
       ['* Plan\n\t  ====', '* Plan\n  \\===='],
     ] as const) {
@@ -1659,6 +1714,89 @@ describe('what fix leaves alone', () => {
       assert.ok(sameMarkdown(input, expected), input);
       assert.deepEqual(lintText('inventory.md', expected), [], input);
     }
+  });
+
+  it('writes an escaped - or + one to three columns past the content at the content, where Linear keeps the escape', () => {
+    // Linear drops the escape there, and the line becomes a list item.
+    for (const [input, expected] of [
+      ['1. Plan:\n\t\\- step', '1. Plan:\n   \\- step'],
+      ['1. Plan:\n    \\+ step', '1. Plan:\n   \\+ step'],
+      ['* Plan:\n     \\- step', '* Plan:\n  \\- step'],
+      ['* Week\n  * Plan:\n     \\- step', '* Week\n  * Plan:\n    \\- step'],
+      ['> * Plan:\n>    \\- step', '> * Plan:\n>   \\- step'],
+      ['Plan:\n \\- step', 'Plan:\n\\- step'],
+      ['1. Plan:  \n\t\\- step', '1. Plan:  \n   \\- step'],
+      ['1. Plan:\n\n   Steps:\n    \\- step', '1. Plan:\n\n   Steps:\n   \\- step'],
+      ['1. Plan:\n\t\\-\tstep', '1. Plan:\n   \\-\tstep'],
+      ['1. Plan:\n\t\\-\n   More', '1. Plan:\n   \\-\n   More'],
+      ['1. Plan:\n    first\n    \\- step', '1. Plan:\n    first\n   \\- step'],
+      ['Plan\n  \\- spare', 'Plan\n\\- spare'],
+      ['Plan\n  \\+ spare', 'Plan\n\\+ spare'],
+      ['* Plan\n    \\- spare', '* Plan\n  \\- spare'],
+      // A tab can span fewer columns under the shorter prefix fix writes:
+      // there it would end two columns past the content.
+      ['-   Plan\n    \t\\- spare', '* Plan\n  \\- spare'],
+      // Kept: at the content, past it four columns or more (no item starts
+      // there, and the escape goes), \* and a dash before text.
+      ['1. Plan:\n   \\- step', '1. Plan:\n   \\- step'],
+      ['* Plan:\n      \\- step', '* Plan:\n      - step'],
+      ['1. Plan:\n\t\\* step', '1. Plan:\n    \\* step'],
+      ['1. Plan:\n\t\\-step', '1. Plan:\n    -step'],
+      // In a code span the line is code: Linear joins it with a space.
+      ['1. Plan:\n    `a\n    \\- b`', '1. Plan:\n    `a  \\- b`'],
+      // Columns count after the prefixes fix writes: `> ` for a quote, and
+      // a shorter item prefix, after which a tab spans fewer columns.
+      ['> Plan\n \\- step', '> Plan\n> \\- step'],
+      ['>    1. Plan:\n>       \t\\- x', '> 1. Plan:\n>    \\- x'],
+      ['>  * Plan:\n>    \t\\- step', '> * Plan:\n>   \t\\- step'],
+      // A task item's text starts two columns in, after `- ` (probed).
+      ['- [ ] Plan:\n    \\- x', '- [ ] Plan:\n  \\- x'],
+      // A no-break space after the space is text, not a separator.
+      ['* Plan\n   \\+ \u00a0step', '* Plan\n  \\+ \u00a0step'],
+    ] as const) {
+      assert.equal(fixText(input), expected, JSON.stringify(input));
+      assert.equal(fixText(expected), expected, JSON.stringify(input));
+      assert.ok(sameMarkdown(input, expected), JSON.stringify(input));
+      assert.deepEqual(lintText('a.md', expected), [], JSON.stringify(input));
+    }
+  });
+
+  it('writes a lone + or \\+ right below an item\'s first line, before more text, with a no-break space, as Linear keeps it', () => {
+    // Linear reads a lone `+` there as an empty item (code four or more
+    // columns past the item's text) and drops the escape of `\+`; a no-break
+    // space after it keeps it text.
+    const nbsp = '\u00a0';
+    for (const [input, expected] of [
+      ['1. Plan\n   +\n   More', `1. Plan\n   +${nbsp}\n   More`],
+      ['1. Plan\n\t\\+\nMore', `1. Plan\n   +${nbsp}\n   More`],
+      ['1. Plan\n       +\n   More', `1. Plan\n   +${nbsp}\n   More`],
+      ['1. Plan  \n   +\n   More', `1. Plan  \n   +${nbsp}\n   More`],
+      ['* Week\n  * Plan\n    +\n    More', `* Week\n  * Plan\n    +${nbsp}\n    More`],
+      ['10. Plan\n    +\n    More', `10. Plan\n    +${nbsp}\n    More`],
+      // A task item's text column is past `- `, not past its checkbox.
+      ['- [ ] Plan\n  +\n  More', `- [ ] Plan\n  +${nbsp}\n  More`],
+      // Text that fix moves onto the marker's line, or a code span it joins,
+      // brings the plus sign up to the second line.
+      ['1.\n   Plan\n   +\n   More', `1. Plan\n   +${nbsp}\n   More`],
+      ['* `A\n  B`\n  +\n  More', `* \`A B\`\n  +${nbsp}\n  More`],
+      // A hard break after the sign stays.
+      ['* Plan\n  +  \n  More', `* Plan\n  +${nbsp}  \n  More`],
+      // Kept: the paragraph's last line, a later line, a quote, the top level and a plus before text.
+      ['1. Plan\n   +', '1. Plan\n   +'],
+      ['1. Plan\n   Note\n   +\n   More', '1. Plan\n   Note\n   +\n   More'],
+      ['> 1. Plan\n>    +\n>    More', '> 1. Plan\n>    +\n>    More'],
+      ['Plan\n+\nMore', 'Plan\n+\nMore'],
+      ['1. Plan\n   +x\n   More', '1. Plan\n   +x\n   More'],
+    ] as const) {
+      assert.equal(fixText(input), expected, JSON.stringify(input));
+      assert.equal(fixText(expected), expected, JSON.stringify(input));
+      assert.deepEqual(lintText('a.md', expected), [], JSON.stringify(input));
+    }
+    // Not when the added characters would take the text over Linear's content limit.
+    const full = '* Plan\n  +\n  ' + 'a'.repeat(CONTENT_LIMIT - 13);
+    assert.equal(fixText(full), full);
+    // Linear's own export is captured as it is: no character is added there.
+    assert.equal(fixText('1. Plan\n   +\n   More', { linearExport: true }), '1. Plan\n   +\n   More');
   });
 
   it('writes a bare plus on a paragraph continuation without creating an item', () => {

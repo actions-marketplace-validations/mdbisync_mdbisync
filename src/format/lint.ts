@@ -7,13 +7,13 @@ import type { Definition, ImageReference, LinkReference, Nodes, PhrasingContent,
 import { CONTENT_LIMIT, LINT_RULES, type Finding, type LintRule } from './rules.ts';
 import { ASSETS_FOLDER } from '../sync/upload-type.ts';
 import { allowedLink, bracketedLabel, codeSpanText, linearDropsCodeSpaces, listKind, listParts, MAX_LIST_NUMBER, nestsMarkerText, opensWithText, MARKDOWN_MAX_NODES, MarkdownLimitError, end, imageDestination, line, lineCount, linkDestination, parse, resolveTarget, splitFile, start, visit, endingRow } from './markdown.ts';
-import { unwritableSectionLine } from './sections.ts';
+import { sectionsFirstInItem, unwritableSectionLine } from './sections.ts';
 import { tabReferences } from './tab-reference.ts';
 
 const GIT_MARKER = /^ {0,3}(?:<{7}|>{7})(?: |$)/;
 const QUOTE_PREFIX = /^ {0,3}> ?/;
 const ATX_HEADING = /^#{1,6}(?:[ \t]|$)/;
-const FIX_ONLY_RULES: ReadonlySet<LintRule> = new Set<LintRule>(['code-span-padding', 'hard-break-in-heading', 'list-after-item-text', 'list-number-too-long', 'setext-heading-lines', 'table-header-pipe', 'table-list-cell', 'tab-reference-layout', 'unplaced-link', 'number-paragraph']);
+const FIX_ONLY_RULES: ReadonlySet<LintRule> = new Set<LintRule>(['code-span-padding', 'hard-break-in-heading', 'list-after-item-text', 'list-number-too-long', 'setext-heading-lines', 'table-header-pipe', 'table-list-cell', 'tab-reference-layout', 'space-reference-edge', 'unplaced-link', 'number-paragraph']);
 const NUMBER_ONLY = /^\d{1,9}\\[.)]$/;
 const LIST_CELL = /^(?:[*+-]|\d{1,9}\))(?:[ \t]|$)/;
 const LINK_ATTRIBUTE = /\b(?:src|href)\s*=/i;
@@ -141,8 +141,64 @@ export function lintText(file: string, text: string, options: LintOptions = {}):
   lintTree(file, tree, content, report, options);
   const { unsafeLine } = tabReferences(content);
   if (unsafeLine !== undefined) report('tab-reference-layout', unsafeLine);
+  for (const at of spaceReferenceEdges(tree, content)) report('space-reference-edge', at);
   return sorted();
 }
+
+/**
+ * The lines of space references (`&#32;`) at the start or end of a
+ * paragraph's or heading's text, also just inside bold, italic or
+ * strikethrough there, and next to an image, which `fix` writes as a
+ * paragraph of its own. Linear stores the space on its first write and
+ * drops it on the next: no text `fix` writes reads back the same in both, so
+ * `fix` leaves the file to its author. A table cell is left out: Linear can
+ * end a table where Markdown reads more rows.
+ */
+function spaceReferenceEdges(tree: Root, body: string): number[] {
+  const lines: number[] = [];
+  // Literal spaces or tabs only: a reference to a space is not blank.
+  const blank = (node: PhrasingContent): boolean => node.type === 'text' && node.position !== undefined && /^[ \t\n]*$/.test(body.slice(start(node), end(node)));
+  const edgeText = (child: PhrasingContent | undefined, side: 'first' | 'last'): PhrasingContent | undefined => {
+    while (child !== undefined && (child.type === 'strong' || child.type === 'emphasis' || child.type === 'delete')) child = side === 'first' ? child.children[0] : child.children.at(-1);
+    return child?.type === 'text' && child.position !== undefined ? child : undefined;
+  };
+  const check = (child: PhrasingContent | undefined, side: 'first' | 'last'): void => {
+    const text = edgeText(child, side);
+    if (text?.type !== 'text') return;
+    // Spaces next to an image go when `fix` splits the paragraph there.
+    let from = start(text);
+    let to = end(text);
+    while (from < to && (body[from] === ' ' || body[from] === '\t')) from++;
+    while (to > from && (body[to - 1] === ' ' || body[to - 1] === '\t')) to--;
+    // An escaped `\&#32;` is literal text, not a space.
+    const escaped = (at: number): boolean => {
+      let slashes = 0;
+      while (at - slashes - 1 >= 0 && body[at - slashes - 1] === '\\') slashes++;
+      return slashes % 2 === 1;
+    };
+    if (side === 'first' && SPACE_REFERENCE_START.test(body.slice(from, from + 16)) && !escaped(from)) lines.push(line(text));
+    const ending = SPACE_REFERENCE_END.exec(body.slice(Math.max(from, to - 16), to));
+    if (side === 'last' && ending !== null && !escaped(to - ending[0].length)) lines.push(text.position!.end.line);
+  };
+  visit(tree, (node) => {
+    if (node.type !== 'paragraph' && node.type !== 'heading') return;
+    const parts: PhrasingContent[][] = [[]];
+    for (const child of node.children) {
+      if (node.type === 'paragraph' && (child.type === 'image' || child.type === 'imageReference')) parts.push([]);
+      else parts.at(-1)!.push(child);
+    }
+    for (const part of parts) {
+      const kept = part.filter((child, index) => !(blank(child) && (index === 0 || index === part.length - 1)));
+      check(kept[0], 'first');
+      check(kept.at(-1), 'last');
+    }
+  });
+  return lines;
+}
+
+/** A decimal or hexadecimal space reference starting, or ending, a text. */
+const SPACE_REFERENCE_START = /^&#(?:0*32|[xX]0*20);/;
+const SPACE_REFERENCE_END = /&#(?:0*32|[xX]0*20);$/;
 
 /**
  * The empty cells `fix` adds to a table: it writes every row with as many
@@ -467,6 +523,20 @@ function lintTree(file: string, tree: Root, body: string, report: (rule: LintRul
   });
   const section = unwritableSectionLine(body);
   if (section !== undefined) report('section-opener', section);
+  // A section is a block too: Linear writes it below an empty marker line,
+  // which it reads back as an empty item and the section outside it.
+  if (body.includes('+++') || body.includes('>>>')) {
+    // The section parse splits lines the ordinary parse reads as one
+    // paragraph, so it can pass the parser's limits where that one did not.
+    let firstInItem: number[] = [];
+    try {
+      firstInItem = sectionsFirstInItem(body);
+    } catch (error) {
+      if (!(error instanceof MarkdownLimitError)) throw error;
+      report('markdown-complexity', 1);
+    }
+    for (const at of firstInItem) report('block-first-in-list-item', body.slice(0, at).split('\n').length);
+  }
 }
 
 /**

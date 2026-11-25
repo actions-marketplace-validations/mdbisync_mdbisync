@@ -147,15 +147,20 @@ Blocks:
   text, since an empty marker cannot interrupt a paragraph, but Linear reads
   it as an empty item nested in that item. `fix` writes it at the item's
   content with a space after it, as Linear does: `1. Plan` followed by
-  `        2.` is written `1. Plan` and `   2. `. Indented four or more
-  columns past the content, the line reads as indented code in Linear;
+  `        2.` is written `1. Plan` and `   2. `. Spaces or a tab at the end of
+  the item's first line go, as Linear drops them there. Indented four or
+  more columns past the content, the line reads as indented code in Linear;
   `fix` writes the same form there. Numbered lines after it (`2. step`,
   `3. pack`, not `1.`) become the items of a list in Linear, nested in the
   empty item where they reach its content: `fix` writes them that way,
-  unescaped, which still reads as the paragraph's text. Linear reads the
+  unescaped, which still reads as the paragraph's text. A line of only its
+  number becomes an empty item (`3. `), and text that starts with marks
+  (`2. **Tip**`) stays an item's text; a heading or quote there would open
+  a block in Linear's item, so such a line stays escaped text. Linear reads the
   line as text under a quote, after more lines of the paragraph, before
   other text or an ordered list in the item, and with `)` or `+`: there it
-  stays as it is.
+  stays as it is. After a line break at the end of the item's first line it
+  stays as it is too.
 - Task items use `-` and an uppercase `X`: `* [x] done` becomes
   `- [X] done`. A checkbox without a label keeps one space after it. Text
   right after the checkbox gets a backslash where Linear writes one: before
@@ -184,6 +189,12 @@ Blocks:
   Linear keeps such text but can return `4\) pear` and a lone `\+` without
   their escapes. The sync restores an escape where the text would read as
   a block. A lone `+` on a paragraph continuation line stays plain.
+  As the second line of a list item's text, with more of that paragraph
+  after it, Linear reads a lone `+` as an empty item (four or more columns
+  past the item's text, as code) and drops the backslash of `\+`: there
+  `fix` writes `+` and a no-break space at the column of the item's text,
+  which Linear keeps as text. Under a quote, and on later lines, the `+`
+  stays as it is.
 - A line that opens with three or more `>` signs is a collapsible section
   in Linear, not a nested quote, and `fix` writes it as Linear does: the
   rest of the line becomes the title of a `+++` line, and the section holds
@@ -215,9 +226,11 @@ Blocks:
 - A section marker that starts a list item or quote opens a section when
   more of the item or quote follows it, also on the next line: Linear reads
   `1. +++Plan` followed by `   first step` as a section titled `Plan`. In a
-  list item `fix` writes it as Linear does: the marker alone on its line
-  with a space (`1. `), a blank line, then the section. A marker that is
+  quote `fix` writes it as Linear does. In a list item it is
+  [`block-first-in-list-item`](#block-first-in-list-item). A marker that is
   the item's only text stays text.
+- An empty list item followed by a blank line and a section is an empty
+  item with the section after it, outside the item, as Linear reads it.
 - Lazy quote lines get their `>`. A blank line between blocks in a quote
   is a bare `>`; a blank line inside a code block in a quote keeps the
   space (`> `), as Linear writes it. A lazy line of only `-` or `=` in a
@@ -298,6 +311,8 @@ Inline text:
   Bold immediately inside another bold span is folded into the outer span.
   In a chain of four-asterisk boundaries such as `**a****b****c**`,
   Linear writes `**ab**c`.
+  An empty bold run before a bold run, as in `****Plan**.**`, bolds only
+  the text up to the next `**` in Linear: it becomes `**Plan**.`.
   In `**(**notes**)**`, Linear joins the first two bold runs and leaves
   the closing punctuation outside, as `**(notes**)`. A pair of stars
   enclosing italic spans separated by spaces goes, so `**a* *b**`
@@ -385,11 +400,12 @@ Inline text:
 - A space reference (`&#32;`, `&#x20;`) becomes a space, as Linear stores
   it; in a link label too. At the inner edge of bold, italic or
   strikethrough the space moves out of it: `x **&#32;Tip** y` becomes
-  `x  **Tip** y`. At the start or end of a paragraph, heading, item, quote
-  or cell the space goes, since Linear drops it on its next write:
-  `**&#32;Tip** one` becomes `**Tip** one`. Where a space would change
-  what the text says (make a line break, a list item or HTML, or close a
-  heading), the reference stays.
+  `x  **Tip** y`. Where a space would change what the text says (make a
+  line break, a list item or HTML, or close a heading), the reference
+  stays. At the start or end of a paragraph, heading, item or quote
+  `fix` leaves the file to its author: see
+  [`space-reference-edge`](#space-reference-edge). At the start or end of a
+  table cell the space goes, since Linear drops it on its next write.
 - A tab reference (`&#9;`, `&#x9;`) becomes a literal tab in inline
   text. At the inner edge of an emphasis mark it moves outside the mark.
   Where the tab would change how Markdown reads the text, `fix` leaves
@@ -409,6 +425,13 @@ Inline text:
   underline the paragraph above, and a `\-` or `\+` on a continuation
   line indented four or more columns past its list item or quote (`\-x`
   after any indentation).
+  A `\-` before a space, a tab or the line's end, or a `\+` before a space
+  or tab and text, that starts a continuation line one to three columns
+  past where its list item's or quote's text starts (the line's start
+  outside them) loses its escape in Linear and becomes a list item. `fix`
+  writes that line at the column where that text starts, where Linear
+  keeps the escape: under `1. Plan:`, a tab-indented `\- step` is written
+  as `   \- step`.
   Escapes that keep text from becoming Markdown syntax or an emoji stay.
 - A backslash line break (`\` at the end of a line) loses its backslash,
   as Linear writes it; spaces or a tab before it stay. Linear holds every
@@ -841,6 +864,18 @@ The sync sends the file as written.
 1. &#9;Collect the seeds.
 ```
 
+### `space-reference-edge`
+
+Linear stores a space character reference at the start or end of
+a paragraph, heading or list item as a space, and drops that
+space the next time the document is written, so no form of this text stays
+the same in Linear. Fix leaves this document as-is. Remove the reference,
+or keep the space inside the text. The sync sends the file as written.
+
+```markdown
+1. Book the train&#32;
+```
+
 ### `git-conflict-marker`
 
 Git conflict marker lines are rewritten as headings, quotes or collapsible
@@ -939,18 +974,23 @@ is.
 
 ### `block-first-in-list-item`
 
-A list item that starts with a heading, code, a quote or another block is
-written in a form Markdown reads as an empty item. Start the item with a
-line of text and put the block below it. Before such a block Linear adds
-an empty paragraph and writes the marker, a blank line and the indented
-block, so the block falls out of the list. `fix` cannot
-choose the text the item should start with, so it leaves the file to you.
-A list that starts an item (`* * a`, `1. 2.`) is no finding: `fix` writes
-it below the marker line, as Linear does.
+A list item that starts with a heading, code, a quote, a collapsible
+section or another block is written in a form Markdown reads as an empty
+item. Start the item with a line of text and put the block below it.
+Before such a block Linear adds an empty paragraph and writes the marker,
+a blank line and the indented block, so the block falls out of the list.
+Linear reads that form of a section the same way: the section moves out
+of the item, and the rest of the item's list starts a new list after it.
+`fix` cannot choose the text the item should start with, so it leaves the
+file to you. A list that starts an item (`* * a`, `1. 2.`) is no finding:
+`fix` writes it below the marker line, as Linear does.
 
 ```markdown
 * ## Step one
   Install the tools.
+1. +++ Notes
+   Water daily.
+   +++
 ```
 
 ### `ordered-task-list`

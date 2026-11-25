@@ -375,7 +375,9 @@ The `linear-format` hook's rules leave a file out too until it is fixed:
 `section-opener`, `url-in-html`, `block-first-in-list-item`, `ordered-task-list`,
 `image-not-in-repository`, `image-file-missing` and
 `document-in-assets-folder`. Each is described, with its fix, in
-[linear-format.md](linear-format.md#lint-rules).
+[linear-format.md](linear-format.md#lint-rules). A list item that opens
+with a collapsible section (`1. +++ Notes` with more of the item below
+it) is `block-first-in-list-item`: put a line of text first in the item.
 
 `mdbisync lint` and `mdbisync fix` also report `hard-break-in-heading`
 when converting a setext heading to one line would lose a hard break, and
@@ -391,7 +393,9 @@ inside other text as a link; the sync sends such a file as it is. See
 The same applies to [`tab-reference-layout`](linear-format.md#tab-reference-layout)
 when reading a literal tab would change the Markdown, and to
 [`code-span-padding`](linear-format.md#code-span-padding) for inline code
-whose outer spaces Linear drops.
+whose outer spaces Linear drops, and to
+[`space-reference-edge`](linear-format.md#space-reference-edge) for a space
+reference at the start or end of a block's text.
 
 `mdbisync lint` run on a folder also reports `upload-file-refused` for a
 file an earlier sync captured from Linear (named `<sha256>.<ext>`) that the

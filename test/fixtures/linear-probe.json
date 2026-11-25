@@ -109,6 +109,10 @@
       "yjs": "recorded",
       "fixedPoint": true
     },
+    "construct-singles/bold-empty-run.md": {
+      "yjs": "recorded",
+      "fixedPoint": true
+    },
     "construct-singles/bold-italic-boundaries.md": {
       "yjs": "recorded",
       "fixedPoint": true
@@ -297,6 +301,10 @@
       "yjs": "recorded",
       "fixedPoint": true
     },
+    "construct-singles/escaped-marker-content-column.md": {
+      "yjs": "recorded",
+      "fixedPoint": true
+    },
     "construct-singles/escapes.md": {
       "yjs": "recorded",
       "fixedPoint": true
@@ -373,7 +381,15 @@
       "yjs": "recorded",
       "fixedPoint": true
     },
+    "construct-singles/item-section-after-empty-item.md": {
+      "yjs": "recorded",
+      "fixedPoint": true
+    },
     "construct-singles/item-section-long-run.md": {
+      "yjs": "recorded",
+      "fixedPoint": true
+    },
+    "construct-singles/item-section-nested.md": {
       "yjs": "recorded",
       "fixedPoint": true
     },
@@ -517,6 +533,10 @@
       "yjs": "recorded",
       "fixedPoint": true
     },
+    "construct-singles/plus-line-in-item.md": {
+      "yjs": "recorded",
+      "fixedPoint": true
+    },
     "construct-singles/quote-empty-nested.md": {
       "yjs": "recorded",
       "fixedPoint": true
@@ -550,6 +570,10 @@
       "fixedPoint": true
     },
     "construct-singles/section-marker-nested.md": {
+      "yjs": "recorded",
+      "fixedPoint": true
+    },
+    "construct-singles/section-marker-quote.md": {
       "yjs": "recorded",
       "fixedPoint": true
     },
@@ -1078,6 +1102,14 @@
       "fixedPoint": true
     },
     "list-items/list-form-empty-item-numbered-lines.md": {
+      "yjs": "recorded",
+      "fixedPoint": true
+    },
+    "list-items/list-form-empty-item-numbered-marks.md": {
+      "yjs": "recorded",
+      "fixedPoint": true
+    },
+    "list-items/list-form-empty-item-trailing-space.md": {
       "yjs": "recorded",
       "fixedPoint": true
     },
