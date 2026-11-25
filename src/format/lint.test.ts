@@ -10,11 +10,12 @@ import { fileURLToPath } from 'node:url';
 import { after, describe, it } from 'node:test';
 import { markdownFiles, runFix, runLint } from './command.ts';
 import { fixText } from './fix.ts';
-import { duplicateTitles, lintText } from './lint.ts';
-import { MarkdownLimitError } from './markdown.ts';
+import { duplicateTitles, lintInTree, lintText } from './lint.ts';
+import { parse, visit } from './markdown.ts';
 import { CONTENT_LIMIT, LINT_RULES, type LintRule } from './rules.ts';
 
 const cases: Array<[LintRule, string, number]> = [
+  ['tab-reference-layout', 'Seed&#9;order\n\n1. &#9;Collect', 3],
   ['footnote', 'Text.\n\nA claim.[^1]\n\n[^1]: Source.', 3],
   ['footnote', 'An inline note.^[Text.]', 1],
   ['subscript', 'H~2~O', 1],
@@ -23,6 +24,16 @@ const cases: Array<[LintRule, string, number]> = [
   ['table-hash-cell', 'Intro.\n\n> | Name | No. |\n> | -- | -- |\n> | Example |  # |', 5],
   ['table-hash-cell', '| A |\n| -- |\n| ## |', 3],
   ['table-hash-cell', '| A |\n| -- |\n| # Total **12** |', 3],
+  ['table-list-cell', '| A | B |\n| -- | -- |\n| 1 | 2 |\n| + fee | 3 |', 4],
+  ['table-list-cell', '| A |\n| -- |\n| - |', 3],
+  ['table-list-cell', '| A |\n| -- |\n| * fee |', 3],
+  ['table-list-cell', '> | A | B |\n> | -- | -- |\n> | x | 3) |', 3],
+  ['table-header-pipe', 'Intro.\n\nTotal\n| --- |\n| 5 |', 3],
+  ['table-header-pipe', '* Item\n\n  Total\n  |---|\n  |5|', 3],
+  ['list-after-item-text', '1. Plan\n\n   2.\n      * step', 3],
+  ['list-after-item-text', '* Plan\n  * one\n\n  3. two', 4],
+  ['setext-heading-lines', 'Intro.\n\nPlan\nfor May\n===', 3],
+  ['setext-heading-lines', '> Plan\n> for May\n> ---', 1],
   ['image-in-link', '[![a](x.png)](https://example.com)', 1],
   ['table-alignment', '| A | B |\n| :-- | --: |\n| 1 | 2 |', 1],
   ['link-scheme', '[Remove](javascript:alert%281%29)', 1],
@@ -44,7 +55,13 @@ const cases: Array<[LintRule, string, number]> = [
   ['url-in-html', '<div>See HTTPS://example.com</div>', 1],
   ['url-in-html', '<div>1git+ssh://host/repo</div>', 1],
   ['url-in-html', '<img SRC = "logo.png">', 1],
+  ['unplaced-link', 'See "www.example.com/a\\_b" now.', 1],
+  ['unplaced-link', 'Intro.\n\n> Read "www.example.com/a&amp;b" now.', 3],
+  ['unplaced-link', 'Intro.\n\nLine *one*\nline two "www.example.com/a\\_b" end.', 4],
   ['block-first-in-list-item', '* ## Heading\n* Plain', 1],
+  ['ordered-task-list', '1. [ ] alpha\n2. [x] beta', 1],
+  ['ordered-task-list', '1. one\n2. [ ] two', 2],
+  ['ordered-task-list', '* a\n\n  3. [X] b', 3],
   ['image-not-in-repository', 'Intro.\n\n![Chart](https://example.com/chart.png)', 3],
   ['image-not-in-repository', '![Chart](https://uploads.linear.app/a/b/chart.png)', 1],
   ['image-not-in-repository', '![Dot](data:image/png;base64,iVBORw0KGgo=)', 1],
@@ -62,10 +79,39 @@ const cases: Array<[LintRule, string, number]> = [
   ['image-not-in-repository', '![Query](?raw=1)', 1],
 ];
 
+it('tab references that change Markdown layout stop fix only', () => {
+  const cases = [
+    '&#9;', '**&#9;&#9;Tip**', 'Collect&#9;', '1. &#9;Collect', '> &#9;Rest',
+    'See **&#9;** today.', 'Before&#9;![Photo](photo.png) after.',
+    'Before ![Photo](photo.png) &#9;after.', 'See www.example.com/garden&#9;',
+  ];
+  for (const input of cases) {
+    assert.deepEqual(lintText('doc.md', input).map(({ rule, line }) => [rule, line]), [['tab-reference-layout', 1]], input);
+    assert.deepEqual(lintInTree('doc.md', input, new Set(['photo.png'])), [], input);
+    assert.equal(fixText(input), input);
+  }
+});
+
 describe('lint rules', () => {
   it('table-hash-cell spares a header hash, an escaped hash and a hash that is no heading', () => {
     const text = '| # | `#` |\n| -- | -- |\n| \\# | **#** |\n| Issue # | #5 |\n| \\## | ####### |';
     assert.deepEqual(lintText('doc.md', text), []);
+  });
+
+  it('table-list-cell spares the header row, escaped markers, markers without a space and a number with a dot', () => {
+    const text = '| + head | 1) |\n| -- | -- |\n| \\+ fee | \\- fee |\n| \\* fee | +fee |\n| -5 | 12. |\n| 3. x | **- x** |';
+    assert.deepEqual(lintText('doc.md', text), []);
+  });
+
+  it('table-header-pipe spares a table whose header row has a pipe', () => {
+    for (const text of ['| Total |\n| --- |\n| 5 |', 'Total |\n--- |\n5 |', '| Total\n| ---\n| 5', '|Total|\n|-|\n|5|']) {
+      assert.deepEqual(lintText('doc.md', text), [], text);
+    }
+  });
+
+  it('setext-heading-lines spares a heading of one text line and a line break inside a code span', () => {
+    // A character reference for a line feed is no line ending in the source.
+    for (const text of ['Plan for May\n===', 'Plan `for\nMay`\n---', '# Plan\nfor May', '# One&#10;Two', 'One&#10;Two\n===']) assert.deepEqual(lintText('doc.md', text), [], text);
   });
 
   it('table-hash-cell spares a hash followed by markup in the same cell', () => {
@@ -81,6 +127,14 @@ describe('lint rules', () => {
       assert.equal(findings.find((f) => f.rule === rule)?.message, LINT_RULES[rule]);
     });
   }
+
+  it('leaves unplaced-link out of the sync, which sends the text as it is', () => {
+    assert.deepEqual(lintInTree('doc.md', 'See "www.example.com/a\\_b" now.', new Set()), []);
+  });
+
+  it('allows space breaks in paragraphs and trailing spaces inside heading code spans', () => {
+    assert.deepEqual(lintText('doc.md', 'One  \nTwo\n\n`Three  \nFour`\n==='), []);
+  });
 
   it('checks image files only through the existence check, and never plain links', () => {
     const text = '![Here](img/here.png)\n\n![Gone](img/gone.png)\n\n[Gone](img/gone.png) and [site](https://example.com).';
@@ -124,20 +178,26 @@ describe('lint rules', () => {
     assert.deepEqual(lintText('doc.md', tables).map((f) => [f.rule, f.line]), [['markdown-complexity', 347]]);
   });
 
-  it('refuses a table that only a rewrite exposes: fix throws instead of padding it', () => {
-    // The image makes the header one cell wider than the delimiter row, so the source has no table; once
-    // fix moves the image out of the paragraph, the rest is a 300-column table over 300 one-cell rows.
+  it('keeps the rows around an image text: moving the image out exposes no table to pad', () => {
+    // The image makes the header one cell wider than the delimiter row, so the source has no table. Without
+    // the image, the rest would be a 300-column table over 300 one-cell rows: fix escapes its delimiter row.
     const text = `![i](i.png) ${raggedTable(300, 300)}`;
     assert.deepEqual(lintText('doc.md', text), []);
-    assert.throws(() => fixText(text), MarkdownLimitError);
+    const fixed = fixText(text);
+    assert.ok(fixed.startsWith(`![i](i.png)\n\n${'|a'.repeat(300)}|\n\\${'|-'.repeat(300)}|\n`), 'the delimiter row is escaped');
+    assert.equal(fixText(fixed), fixed);
+    visit(parse(fixed), (node) => assert.notEqual(node.type, 'table'));
   });
 
   it('keeps padding a ragged table within the limits', () => {
     const text = raggedTable(200, 200);
     assert.deepEqual(lintText('doc.md', text), []);
     const fixed = fixText(text);
-    assert.equal(fixed.split('\n').length, 202);
-    assert.ok(fixed.split('\n').every((row) => row.split(' | ').length === 200), 'every row has the header width');
+    // A document that ends with a table ends with a line break.
+    assert.ok(fixed.endsWith(' |\n'));
+    const rows = fixed.slice(0, -1).split('\n');
+    assert.equal(rows.length, 202);
+    assert.ok(rows.every((row) => row.split(' | ').length === 200), 'every row has the header width');
   });
 
   // Many short references to one long definition: `fix` writes each with its own copy of the destination.
@@ -154,12 +214,15 @@ describe('lint rules', () => {
     assert.deepEqual(lintText('doc.md', images).map((f) => f.rule), ['markdown-complexity']);
   });
 
-  it('refuses references that only a rewrite exposes: fix throws instead of expanding them', { timeout: 60_000 }, () => {
+  it('keeps a definition after an image text: moving the image out exposes no references to expand', { timeout: 60_000 }, () => {
     // The definition shares a paragraph with an image, so the source has none and the references are text;
-    // once fix moves the image out of the paragraph, the definition applies to all of them.
+    // fix escapes its label once the image leaves the paragraph, so they stay text.
     const text = `${'[a][r] '.repeat(100)}\n\n![i](i.png) [r]: https://example.com/${'x'.repeat(5_000)}\n`;
     assert.deepEqual(lintText('doc.md', text), []);
-    assert.throws(() => fixText(text), MarkdownLimitError);
+    const fixed = fixText(text);
+    assert.ok(fixed.includes('\n\n![i](i.png)\n\n\\[r\\]: '), 'the label is escaped');
+    assert.ok(fixed.length < 2 * text.length, 'no reference is expanded');
+    assert.equal(fixText(fixed), fixed);
   });
 
   it('counts the parentheses fix adds around a shortcut reference', () => {
@@ -205,11 +268,12 @@ describe('lint rules', () => {
     assert.ok(fixed !== text && fixed.length < CONTENT_LIMIT, 'fix writes them inline within the limit');
   });
 
-  it('counts destinations in code points, as the content limit is counted', () => {
-    // 236,000 code points written, though over 400,000 UTF-16 code units.
-    const text = `${'[a][r] '.repeat(2_000)}\n\n[r]: https://example.com/${'\u{1F600}'.repeat(90)}\n`;
-    assert.deepEqual(lintText('doc.md', text), []);
-    assert.notEqual(fixText(text), text);
+  it('counts destinations as Linear writes them, with characters outside ASCII percent-encoded', () => {
+    // Each emoji is written as 12 characters: 2,000 copies of 5 stay under the limit, of 90 they do not.
+    const text = (emoji: number) => `${'[a][r] '.repeat(2_000)}\n\n[r]: https://example.com/${'\u{1F600}'.repeat(emoji)}\n`;
+    assert.deepEqual(lintText('doc.md', text(5)), []);
+    assert.notEqual(fixText(text(5)), text(5));
+    assert.deepEqual(lintText('doc.md', text(90)).map((finding) => finding.rule), ['markdown-complexity']);
   });
 
   it('keeps writing reference links inline within the limit', () => {
@@ -297,6 +361,59 @@ describe('lint and fix commands', () => {
     assert.deepEqual(runFix(['nowhere'], dir), { exitCode: 2, stdout: '', stderr: 'no such file or folder: nowhere\n' });
   });
 
+  it('fix writes a backslash break in a paragraph as Linear does and reports one it leaves', (t) => {
+    const folder = mkdtempSync(join(tmpdir(), 'backslash-break-'));
+    t.after(() => rmSync(folder, { recursive: true, force: true }));
+    writeFileSync(join(folder, 'walk.md'), '- Boots\\\n  and a map\n');
+    writeFileSync(join(folder, 'mixed.md'), 'Boots\\\nand a map\n\nH~2~O\n');
+    writeFileSync(join(folder, 'heading.md'), 'Boots\\\nand a map\n===\n');
+    const finding = (file: string, line: number, rule: LintRule) => `${file}:${line}: ${rule}: ${LINT_RULES[rule]}\n`;
+    const lintBefore = finding('heading.md', 1, 'hard-break-backslash')
+      + finding('mixed.md', 1, 'hard-break-backslash') + finding('mixed.md', 4, 'subscript')
+      + finding('walk.md', 1, 'hard-break-backslash');
+    assert.deepEqual(runLint([], folder), { exitCode: 1, stdout: lintBefore, stderr: '' });
+    // A file with another finding is left as it is; the heading has no form for the break.
+    const left = finding('heading.md', 1, 'hard-break-backslash') + finding('mixed.md', 1, 'hard-break-backslash') + finding('mixed.md', 4, 'subscript');
+    assert.deepEqual(runFix([], folder), { exitCode: 1, stdout: `walk.md: fixed\n${left}`, stderr: '' });
+    assert.equal(readFileSync(join(folder, 'walk.md'), 'utf8'), '* Boots\n  and a map');
+    assert.equal(readFileSync(join(folder, 'mixed.md'), 'utf8'), 'Boots\\\nand a map\n\nH~2~O\n');
+    assert.equal(readFileSync(join(folder, 'heading.md'), 'utf8'), 'Boots\\\nand a map\n===\n');
+    assert.deepEqual(runFix([], folder), { exitCode: 1, stdout: left, stderr: '' });
+    assert.deepEqual(runLint(['walk.md'], folder), { exitCode: 0, stdout: '', stderr: '' });
+  });
+
+  it('reports hard breaks in setext headings and keeps the file through two fixes', (t) => {
+    const fixtureDir = mkdtempSync(join(tmpdir(), 'heading-hard-break-'));
+    t.after(() => rmSync(fixtureDir, { recursive: true, force: true }));
+    // The first also breaks its heading's text with a soft break, which Linear splits off.
+    const cases = [
+      ['heading-setext-break-spaces.md', 'hard-break-in-heading', 2, [[1, 'setext-heading-lines']]],
+      ['heading-setext-break-backslash.md', 'hard-break-backslash', 1, []],
+    ] as const;
+    for (const [file, rule, line, others] of cases) {
+      const source = readFileSync(new URL(`../../test/fixtures/lint-errors/${file}`, import.meta.url), 'utf8');
+      const path = join(fixtureDir, file);
+      writeFileSync(path, source);
+      const findings: Array<readonly [number, LintRule]> = [...others, [line, rule]];
+      const stdout = findings.map(([at, name]) => `${file}:${at}: ${name}: ${LINT_RULES[name]}\n`).join('');
+      const result = { exitCode: 1, stdout, stderr: '' };
+      assert.deepEqual(runLint([file], fixtureDir), result);
+      assert.equal(fixText(source), source);
+      for (let pass = 0; pass < 2; pass++) {
+        assert.deepEqual(runFix([file], fixtureDir), result);
+        const fixed = readFileSync(path, 'utf8');
+        assert.equal(fixed, source);
+        const breaks: number[] = [];
+        visit(parse(fixed), (node, ancestors) => {
+          if (node.type === 'break' && ancestors.some((a) => a.type === 'heading')) {
+            breaks.push(node.position!.start.line);
+          }
+        });
+        assert.deepEqual(breaks, [line]);
+      }
+    }
+  });
+
   it('lint and fix refuse a document inside an assets folder and leave it unchanged', () => {
     const folder = join(dir, 'team');
     try {
@@ -369,16 +486,16 @@ describe('lint and fix commands', () => {
     }
   });
 
-  it('lint and fix report a table that only a rewrite exposes, and leave the file unchanged', () => {
+  it('lint and fix keep rows around an image text, without exposing a table', () => {
     const path = join(dir, 'exposed.md');
     const source = `![i](i.png) ${'|a'.repeat(300)}|\n${'|-'.repeat(300)}|\n${'|x|\n'.repeat(300)}`;
-    const message = `exposed.md:1: markdown-complexity: ${LINT_RULES['markdown-complexity']}\n`;
     try {
       writeFileSync(path, source);
       writeFileSync(join(dir, 'i.png'), 'png');
-      assert.deepEqual(runLint(['exposed.md'], dir), { exitCode: 1, stdout: message, stderr: '' });
-      assert.deepEqual(runFix(['exposed.md'], dir), { exitCode: 1, stdout: message, stderr: '' });
-      assert.equal(readFileSync(path, 'utf8'), source);
+      assert.deepEqual(runLint(['exposed.md'], dir), { exitCode: 1, stdout: "exposed.md: not in Linear's form; run fix\n", stderr: '' });
+      assert.deepEqual(runFix(['exposed.md'], dir), { exitCode: 1, stdout: 'exposed.md: fixed\n', stderr: '' });
+      assert.ok(readFileSync(path, 'utf8').includes(`\n\\${'|-'.repeat(300)}|\n`), 'the delimiter row is escaped');
+      assert.deepEqual(runLint(['exposed.md'], dir), { exitCode: 0, stdout: '', stderr: '' });
     } finally {
       rmSync(path, { force: true });
       rmSync(join(dir, 'i.png'), { force: true });
@@ -388,7 +505,7 @@ describe('lint and fix commands', () => {
   it('lint and fix agree on a hash header without losing cell text', () => {
     const path = join(dir, 'table.md');
     const source = '| # | Customer |\n| -- | -- |\n| 1 | Example |';
-    const fixed = '| \\# | Customer |\n| -- | -- |\n| 1 | Example |';
+    const fixed = '| \\# | Customer |\n| -- | -- |\n| 1 | Example |\n';
     try {
       writeFileSync(path, source);
       assert.deepEqual(runLint(['table.md'], dir), { exitCode: 1, stdout: "table.md: not in Linear's form; run fix\n", stderr: '' });

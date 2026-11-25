@@ -29,7 +29,8 @@ space (`| a  |`), which `fix` writes as `| a |`. The sync takes only such
 re-spellings: a text that `fix` would change into another document (a
 setext heading's two lines written as one) stays as Linear has it. A file
 whose text Linear only re-spells keeps its own text, and a text with a lint
-finding stays as it is, as with `fix` itself.
+finding that `fix` leaves to the author stays as it is, as with `fix`
+itself.
 
 `fix` runs as the `linear-format` pre-commit hook, which every
 synchronized repository needs, and `lint` as the optional
@@ -112,35 +113,132 @@ nothing.
 Blocks:
 
 - Line endings become LF, extra blank lines between blocks collapse to one,
-  and the final line break goes.
+  and the final line break goes. A document that ends with a table, also
+  one at the end of a quote or list item, keeps one final line break, as
+  Linear writes it.
 - Setext headings (text underlined with `===` or `---`) become `#`
   headings, and closing hashes go: `## Summary ##` becomes `## Summary`.
+  A setext heading whose text runs over several lines is left to you
+  ([`setext-heading-lines`](#setext-heading-lines)).
+- An empty heading or quote keeps a space after its marker, as Linear
+  writes it: `##` becomes `## `, and `> >` becomes `> > `.
 - Thematic breaks become `---`: `***` becomes `---`.
 - Bullets become `*`: `- item` becomes `* item`.
 - Loose lists become tight: the blank lines between items go, and a nested
-  list follows its paragraph on the next line.
+  list follows its paragraph on the next line (where Markdown would read
+  its first marker as text, see [`list-after-item-text`](#list-after-item-text)). In a list item, a list of
+  another kind (bullet, numbered, task) follows the list before it on the
+  next line too, where its first line can start a list there.
+- Two or more blank lines after an empty item end the list in Linear:
+  `fix` keeps two there (`2. `, two blank lines, `3. c`). Elsewhere they
+  collapse like other blank lines between items. The list after them
+  starts at the number its first item has, as in Linear: `1. `, two blank
+  lines, `1. b` stays as it is.
+- A list that starts an item goes below the item's marker line, which
+  keeps its space: `fix` writes `1. 2.` as `1. ` above `   2. `, and
+  `* * a` as `* ` above `  * a`.
 - Ordered lists use dots and count up from their start: `1) a` becomes
-  `1. a`.
+  `1. a`. Numbers are right-aligned to the widest one, and every item's
+  content lines up past it: in a list of ten items, the first is written
+  ` 1. a` above `10. j`.
+- An empty item keeps a space after its marker: `*` becomes `* `.
+- A lone `2.` or `*` on the line after an item's first line is the item's
+  text, since an empty marker cannot interrupt a paragraph, but Linear reads
+  it as an empty item nested in that item. `fix` writes it at the item's
+  content with a space after it, as Linear does: `1. Plan` followed by
+  `        2.` is written `1. Plan` and `   2. `. Indented four or more
+  columns past the content, the line reads as indented code in Linear;
+  `fix` writes the same form there. Numbered lines after it (`2. step`,
+  `3. pack`, not `1.`) become the items of a list in Linear, nested in the
+  empty item where they reach its content: `fix` writes them that way,
+  unescaped, which still reads as the paragraph's text. Linear reads the
+  line as text under a quote, after more lines of the paragraph, before
+  other text or an ordered list in the item, and with `)` or `+`: there it
+  stays as it is.
 - Task items use `-` and an uppercase `X`: `* [x] done` becomes
-  `- [X] done`.
+  `- [X] done`. A checkbox without a label keeps one space after it.
+- A paragraph's text that starts like a list marker gets its marker
+  escaped, so it stays text: in `Note` followed by `1. 3. plum`, the
+  `3. plum` is text, and with the blank line `fix` writes before the list it
+  becomes `1. 3\. plum`. Text split off at an image gets the same escape.
+  A literal number followed by a dot and whitespace also gets its dot
+  escaped when it starts a paragraph line. A tab or nonbreaking space
+  immediately after that dot becomes a space. A number and dot alone on a
+  paragraph line before its last get the escape when spaces follow the dot,
+  as Linear writes them; in a list item a bare `2.` there is written
+  `2\. `, which Linear keeps as text where it would otherwise end the
+  paragraph with an empty item.
+  Linear keeps such text but can return `4\) pear` and a lone `\+` without
+  their escapes. The sync restores an escape where the text would read as
+  a block. A lone `+` on a paragraph continuation line stays plain.
+- A line that opens with three or more `>` signs is a collapsible section
+  in Linear, not a nested quote, and `fix` writes it as Linear does: the
+  rest of the line becomes the title of a `+++` line, and the section holds
+  the blocks after it up to a `>>>` line without a title, or else to the
+  end of the document, list item or quote it is in. A `+++` line closes it
+  there. A line `>>> Plans` followed by `Some text` is written as three
+  blocks, one blank line apart: `+++ Plans`, `Some text` and `+++`. A
+  `>>>` line without a title closes every section still open there; with
+  none open, it opens one without a title (`+++` and a space). With spaces
+  between the signs (`> > >`), or when the first sign continues a quote
+  above, it stays a quote. A file that also has a `+++` line is left to
+  you, since Linear would pair that line with the section.
+- A bare `+++` opens an untitled section when it has a body or a closing
+  marker and there is no section open in the same document, list item or
+  quote. `fix` writes that opener with one trailing space, as Linear does.
+  A bare marker inside a section closes the innermost section and is written
+  without trailing whitespace. A final bare marker with no section to close
+  stays plain text.
+- A section marker that starts a list item or quote opens a section when
+  more of the item or quote follows it, also on the next line: Linear reads
+  `1. +++Plan` followed by `   first step` as a section titled `Plan`. In a
+  list item `fix` writes it as Linear does: the marker alone on its line
+  with a space (`1. `), a blank line, then the section. A marker that is
+  the item's only text stays text.
 - Lazy quote lines get their `>`. A blank line between blocks in a quote
   is a bare `>`; a blank line inside a code block in a quote keeps the
   space (`> `), as Linear writes it. A lazy line of only `-` or `=` in a
-  quote or list item is indented four spaces after its `>` or indent, so it
-  stays text and does not turn the line above into a heading.
+  quote or list item gets its `>` or indent and a backslash, as Linear
+  writes it (`> \--`), so it stays text and does not turn the line above
+  into a heading. In a link label or an image's alt text that runs over
+  lines, it is indented four spaces after its `>` or indent instead. Inside
+  a code span it joins the line above, like every line of a code span.
 - Linear's color comment of a callout (`<!-- linear:callout color=... -->`)
   stays directly above its callout, with no blank line between them.
 - Tilde fences and indented code become backtick fences. A fence whose info
   string holds a backtick stays a tilde fence, since a backtick fence cannot
   carry one.
+- A code block outside a quote or list item loses the blank lines before
+  its closing fence. Linear returns such a block with one of them fewer
+  each time it is written, so only a block without them comes back
+  unchanged. In a quote or list item the blank lines stay; in a list item
+  a blank line inside a code block keeps the item's indentation, as Linear
+  writes it.
 - `$$` math becomes a `math` fence.
 - Tables get outer pipes and short separators (`| -- | -- |`), and a row
   gets as many cells as the header. A cell containing only `#` is written
   as `\#`, preserving its text, and an escaped `#` that starts a cell keeps
   its escape (a bare one in a body cell is the
-  [`table-hash-cell`](#table-hash-cell) rule).
+  [`table-hash-cell`](#table-hash-cell) rule). A line break tag in a cell
+  (`<br>`, `<br/>`, `<br />`) is written as `&#10;`, as Linear writes it.
+  Linear shows it as a line break; GitHub shows it as a space. A body cell
+  keeps a nonbreaking space around its text; a header cell loses it, as
+  Linear writes them. A body cell of only a number and a dot gets a
+  space after the dot (`| 12.  |`): Linear holds it as an empty numbered
+  list. A body cell that starts with another list marker is the
+  [`table-list-cell`](#table-list-cell) rule, and a table whose header row
+  has no `|` the [`table-header-pipe`](#table-header-pipe) rule.
 - An image does not share a paragraph with text: the text before and after
-  it becomes its own paragraph.
+  it becomes its own paragraph. Where that text would start another block,
+  a backslash escape keeps it text: in
+  `Before ![a](x.png) # x`, the text after the image is written as `\# x`.
+  The same holds for a quote, rule, list marker, code fence, HTML tag,
+  `[label]:` definition, `$$` or `+++` line, Git conflict marker, a `===`
+  or `---` underline and a table's delimiter row. Linear drops some of
+  these escapes from its export. A pull puts the escapes back for literal
+  block starts. When a table or collapsible section exports the same Markdown
+  as paragraph text, the sync uses the accepted file's escapes to tell them
+  apart. A new document with the canonical block spelling keeps that block.
 - A list item holding only a link to a relative file other than Markdown
   takes the form Linear uses for the uploaded file. A video (`.mp4`,
   `.mov`, `.webm`) in a bullet item stays on the marker's line without
@@ -162,23 +260,155 @@ Blocks:
 Inline text:
 
 - Underscore emphasis becomes asterisks: `__bold__ and _em_` becomes
-  `**bold** and *em*`.
+  `**bold** and *em*`. Text that is both bold and italic throughout a
+  span uses three asterisks, as in `***note***`.
+- Asterisks that read as text are escaped. `**Birch****Pine**` becomes
+  `**Birch\*\*\*\*Pine**`, and `**Inventory` becomes `\*\*Inventory`.
+  Consecutive bold spans join when they can keep their formatting.
+  Bold immediately inside another bold span is folded into the outer span.
+  In a chain of four-asterisk boundaries such as `**a****b****c**`,
+  Linear writes `**ab**c`.
+  In `**(**notes**)**`, Linear joins the first two bold runs and leaves
+  the closing punctuation outside, as `**(notes**)`. A pair of stars
+  enclosing italic spans separated by spaces goes, so `**a* *b**`
+  becomes `*a* *b*`.
+- Adjacent links to the same destination become one link, since Linear
+  holds a link as a mark on its text. Bold, italic or strikethrough around
+  a part goes inside the label: `[Shop](https://a.test)**[Sale](https://a.test)**`
+  becomes `[Shop**Sale**](<https://a.test>)`. A space, a line ending or
+  another destination keeps links apart, and so does a `!` before them.
+- Bold around a single link moves into the link label. For example,
+  `**[Map](https://example.com)**` becomes `[**Map**](<https://example.com>)`.
+  When the bold link is followed immediately by punctuation inside the
+  same span, the punctuation gets its own bold marks. A leading bold italic
+  link likewise carries its marks in the label, with separate marks for the
+  text that follows it. When the text starts with a space, Linear writes
+  `*** text***`. CommonMark renders those asterisks literally.
+  When bold spans multiple lines, `fix` closes it and reopens it on each line.
 - Link destinations go in angle brackets: `[a](https://example.com/x)`
-  becomes `[a](<https://example.com/x>)`.
+  becomes `[a](<https://example.com/x>)`. A backslash, `|`, `^`, `{` and
+  `}` in a destination are percent-encoded, as Linear writes them:
+  `[a](https://example.com/a\b)` becomes
+  `[a](<https://example.com/a%5Cb>)`. So are characters outside ASCII, as
+  UTF-8: `[a](https://example.com/café)` becomes
+  `[a](<https://example.com/caf%C3%A9>)`, and such a host is written in its
+  ASCII form (for `café.example`, `xn--caf-dma.example`). The link text
+  stays as written. A `%` that starts no escape becomes
+  `%25`. In a relative path that is not valid percent-encoding, every `%` is
+  written `%25`, so the link still names the same file.
+- A code span that runs over lines is written on one line, as Linear
+  writes it: each line ending becomes a space, and the next line's
+  indentation past its quote or list prefix stays code text (a tab the prefix
+  takes in part leaves its other columns as spaces). `` `make `` on
+  one line and `` all` `` on the next becomes `` `make all` ``. A code span
+  in an image's alt text keeps its lines, and so does one whose joined line
+  would hold a `|`, which could make it a table's head row.
 - Reference links and images are written inline, and their definitions go.
+- Literal square brackets in text are escaped, including those written as
+  character references. For example, `# [Shelf] Inventory` becomes
+  `# \[Shelf\] Inventory`. Linear callout markers such as `> [!TIP]` keep
+  their brackets. A titled or folded Obsidian callout becomes an ordinary quote.
 - Autolinks and bare URLs become links: `See https://example.com now.`
-  becomes `See [https://example.com](<https://example.com>) now.`
+  becomes `See [https://example.com](<https://example.com>) now.` The link
+  text reads exactly as the URL: backslashes are doubled, and characters
+  that would be markup there are escaped:
+  `https://example.com/a~b~c` becomes
+  `[https://example.com/a\~b\~c](<https://example.com/a~b~c>)`.
+  So do web addresses Markdown finds inside other text, where the bare URL
+  rule does not apply: `Site: "www.example.com"` becomes
+  `Site: "[www.example.com](<http://www.example.com>)"`.
+  In a URL label, underscores between ASCII letters, digits or underscores
+  stay plain, as in
+  `[https://example.com/shelf_4](<https://example.com/shelf_4>)`.
+  A trailing underscore in a URL path, query or fragment stays in the link.
+  Matched parentheses can be part of the URL. An unmatched opening or
+  closing parenthesis ends it. Outside paired delimiters, a run of periods
+  before `*`, `~`, `_`, `,`, `;`, `!` or `?` ends the link before the
+  periods. A run of trailing commas or semicolons leaves its last character
+  outside the link.
+- Bare addresses with recognized domain suffixes become HTTP links.
+  `example.com/guide` becomes `[example.com/guide](<http://example.com/guide>)`.
+  Relative paths, standalone Markdown filenames, and suffixes such as
+  `.test` stay as text.
 - Character references to characters outside ASCII become the characters,
   and so does `&amp;` unless a reference follows it:
-  `Fish &amp; chips &mdash; &copy;` becomes `Fish & chips — ©`. Other
-  references to ASCII characters stay, since some would make markup:
-  `&lt;b&gt;`, `&quot;` and `&#65;` are kept.
+  `Fish &amp; chips &mdash; &copy;` becomes `Fish & chips — ©`.
+  `&nbsp;` becomes the nonbreaking space Linear stores for it. Next to `*`,
+  `_` or `~`, a reference stays when its character would change what they
+  mark. A nonbreaking space at the end of a heading stays, as Linear keeps
+  it; spaces and tabs there go.
+  Asterisk references such as `&#42;` become `\*`. Other ASCII references,
+  such as `&lt;b&gt;`, `&quot;` and `&#65;`, stay as written.
+- A space reference (`&#32;`, `&#x20;`) becomes a space, as Linear stores
+  it; in a link label too. At the inner edge of bold, italic or
+  strikethrough the space moves out of it: `x **&#32;Tip** y` becomes
+  `x  **Tip** y`. At the start or end of a paragraph, heading, item, quote
+  or cell the space goes, since Linear drops it on its next write:
+  `**&#32;Tip** one` becomes `**Tip** one`. Where a space would change
+  what the text says (make a line break, a list item or HTML, or close a
+  heading), the reference stays.
+- A tab reference (`&#9;`, `&#x9;`) becomes a literal tab in inline
+  text. At the inner edge of an emphasis mark it moves outside the mark.
+  Where the tab would change how Markdown reads the text, `fix` leaves
+  the file as written and reports [`tab-reference-layout`](#tab-reference-layout).
 - Emoji shortcodes Linear knows become emoji: `Done :tada:` becomes
-  `Done 🎉`.
+  `Done 🎉`. An escaped reference or shortcode (`\&amp;`, `\:tada:`) stays
+  as written.
 - A backslash before anything but ASCII punctuation (a letter, a digit, a
   space) is a literal backslash, and it is doubled, as Linear doubles it:
-  `$\pi$` becomes `$\\pi$`, and `C:\ 2026` becomes `C:\\ 2026`.
-- An escaped `#` inside a line loses its escape: `a \# b` becomes `a # b`.
+  `$\pi$` becomes `$\\pi$`, and `C:\ 2026` becomes `C:\\ 2026`. So is a
+  backslash that ends a paragraph, heading or item, where it breaks no
+  line: `Path ends in \` becomes `Path ends in \\`.
+- Redundant escapes inside a line go. `a \# b` becomes `a # b`, and
+  `**\-10**` becomes `**-10**`.
+  Text such as `\#tag` and `\+value` loses the escape when it cannot open a block.
+  So does a line-start `\=`, except on a line of only `=` that would
+  underline the paragraph above, and a `\-` or `\+` on a continuation
+  line indented four or more columns past its list item or quote (`\-x`
+  after any indentation).
+  Escapes that keep text from becoming Markdown syntax or an emoji stay.
+- A backslash line break (`\` at the end of a line) loses its backslash,
+  as Linear writes it; spaces or a tab before it stay. Linear holds every
+  line ending of a paragraph as a line break, so the break stays one there
+  (see [`hard-break-backslash`](#hard-break-backslash)). The next line
+  loses its own indentation, as in Linear, and its start is escaped as at
+  a line's start: after `Run it \`, a line `  --flag` is written
+  `\--flag`. A break written with two or more trailing spaces stays as it
+  is.
+- A `-` or `*` that starts a line of a paragraph as text gets a backslash,
+  as Linear writes it: `-- a remark` becomes `\-- a remark`, and `*note`
+  becomes `\*note`. After a continuation line's own indentation only the
+  `*` gets one, and so does a `#` that would start a heading there: a
+  continuation line `    # note` is written `    \# note`, and so is a
+  `#` before a no-break space.
+- A line whose text starts with a no-break space (or other whitespace
+  outside ASCII) gets a backslash where Linear looks past that space: before
+  a run of one to six `#` followed by whitespace or the line's end, and
+  before the dot of a number followed by whitespace. A no-break space and
+  `4. Rest` is written with `4\. Rest`. This holds in list items, quotes and
+  body cells too; `-`, `+`, `>` and `4)` stay plain there.
+- A literal `~` gets a backslash, as Linear writes it: `~$5` becomes
+  `\~$5`. So does a literal `_`, unless the characters on both sides of it
+  are ASCII letters, digits or `_`: `snake_case` and `a__b` stay, while
+  `_note` becomes `\_note`, `value__ end` becomes `value_\_ end`, and
+  `é_é` becomes `é\_é`. An escape the rule does not need goes:
+  `file\_name` becomes `file_name`. Link text follows the same rule;
+  strikethrough and code keep their characters.
+- A backtick that opens no code span gets a backslash, as Linear writes it:
+  ``a ` b`` becomes ``a \` b``.
+- A continuation line of a paragraph keeps its own indentation, as Linear
+  does: the quote's `>` or the item's indent is written in place of the
+  source's, and spaces or tabs past it stay. A tab that the item's indent
+  covers only in part leaves its other columns as spaces: under `* item`, a
+  line indented with one tab is written with four spaces. Later tabs stay
+  tabs: under `1. Plan`, two tabs before `2. step` become four spaces and a
+  tab before `2\. step`. Where `fix` writes a shorter prefix than the
+  source's, a tab before text that could open a block becomes the spaces it
+  spanned, except before an escaped number or a number with no space after
+  its dot or parenthesis (`3.x`), which read as text anywhere. A lazy line,
+  indented less than its item's content, whose text is such a number is
+  written under the prefix alone: under `10.  Plan`, a tab before `2. step`
+  becomes four spaces before `2\. step`.
 
 ## How documents look in Linear
 
@@ -217,8 +447,11 @@ names a missing file, until the document or its image is fixed: see
 
 ## Lint rules
 
-Each rule is a construct Linear would lose or alter. `fix` never rewrites a
-file with a finding, so nothing is lost silently; change the file yourself.
+Each rule is a construct Linear would lose or alter, and its message says
+what to do. `fix` never rewrites a file with a finding, so nothing is lost
+silently; change the file yourself. The one exception is
+[`hard-break-backslash`](#hard-break-backslash), which `fix` writes in a
+form Linear keeps where it can.
 
 ### `footnote`
 
@@ -247,17 +480,16 @@ tildes, `~~strikethrough~~`, are fine.
 
 ### `table-escaped-pipe`
 
-An escaped pipe in a plain table cell splits the row. Linear drops the
-backslash, and the pipe starts a new cell.
+An escaped pipe in a plain table cell splits the row. Put the cell text in
+inline code, or rephrase it without the pipe. Linear drops the backslash,
+and the pipe starts a new cell; in inline code (`` `a \| b` ``) it is kept
+as it is.
 
 ```markdown
 | Expression | Meaning |
 | -- | -- |
 | a \| b | either |
 ```
-
-Instead, put the cell text in inline code (`` `a \| b` ``, kept as it is)
-or rephrase without the pipe.
 
 ### `table-hash-cell`
 
@@ -275,6 +507,23 @@ space (`Issue #`, `#5`), is not affected.
 
 Instead, escape the first hash as `\#`, which keeps the text.
 
+### `table-list-cell`
+
+A table body cell starting with -, + or * and a space, or with a number and
+), becomes a list, which Linear writes with * or a number and a dot. Put a
+backslash before the -, + or *, or reword the cell. Linear holds the cell
+as a list: `+ fee` comes back `* fee`, and `3)` comes back `3.`. A header
+cell, an escaped marker (`\+ fee`), a marker without a space after it
+(`+fee`) and a number with a dot (`12.`, `3. x`) keep their text. The rule
+stops only `fix`: a list that someone adds to a cell in Linear is written
+the same way, and the sync keeps such a document.
+
+```markdown
+| Item | Count |
+| -- | -- |
+| + fee | 3) |
+```
+
 ### `image-in-link`
 
 The link around an image is dropped. A badge or a clickable picture loses
@@ -291,10 +540,16 @@ to the page instead.
 
 ### `content-too-long`
 
-Documents over 250,000 characters are rejected. Linear's API refuses the
-whole document. The limit counts Unicode code points of the text after the
-front matter. Such a document is not checked further, so
-`content-too-long` is its only finding: shorten it, then lint it again.
+This document exceeds Linear's 250,000-character content limit. The author
+must decide how to shorten or split it. Linear refuses the whole document.
+The limit counts Unicode code points of the text after the front matter.
+Such a document is not checked further, so `content-too-long` is its only
+finding.
+
+`fix` leaves a file already over the limit as it is. A rewrite can take a
+file past the limit, for example when `fix` writes a bare URL as a link:
+`fix` saves the rewrite and reports `content-too-long`, and `lint` and both
+hooks fail on the file until the author shortens or splits it.
 
 ```text
 A 260 KB log pasted into one Markdown file.
@@ -375,7 +630,8 @@ Instead, rename one of them.
 
 ### `table-alignment`
 
-Table column alignment is dropped.
+Table column alignment is dropped. Remove the colons from the separator row
+to accept that. The separators are then plain: `| -- | -- |`.
 
 ```markdown
 | Item | Price |
@@ -383,67 +639,140 @@ Table column alignment is dropped.
 | Tea | 3 |
 ```
 
-Instead, use plain separators (`| -- | -- |`).
-
 ### `link-scheme`
 
-Links must use http, https, mailto, a path or a fragment.
+Links must use http, https, mailto, a path or a fragment. Change the
+destination, or write the address as inline code. On pull, unsupported
+links are removed together with their text.
 
 ```markdown
 [Unsupported](javascript:alert%281%29)
 ```
 
-On pull, unsupported links are removed together with their text.
-
 ### `link-title`
 
-A link title is dropped. This holds for an inline link and for a reference
-definition.
+A link title is dropped. Remove the title, or move its text into the link
+text. This holds for an inline link and for a reference definition.
 
 ```markdown
 See [the guide](https://example.com/guide "Install guide").
 ```
 
-Instead, drop the title or put its text into the link text.
-
 ### `image-title`
 
-An image title is dropped from the Markdown.
+An image title is dropped from the Markdown. Remove the title, or move its
+text into the alt text.
 
 ```markdown
 ![Logo](logo.png "Company logo")
 ```
 
-Instead, drop the title or move its text into the alt text.
-
 ### `code-in-emphasis`
 
-Bold or italic around inline code is dropped from the code. Linear keeps the
-code and loses the emphasis around it.
+Bold or italic around inline code is dropped from the code. Write the code
+without emphasis, or emphasize the words around it. Linear keeps the code
+and loses the emphasis around it.
 
 ```markdown
 Run **`npm test`** first.
 ```
 
-Instead, write the code without emphasis, or emphasize the words around it.
-
 ### `hard-break-backslash`
 
-A backslash line break becomes a plain line break. Linear drops the
-backslash, and the two lines join into one.
+A backslash line break becomes a plain line break. Run fix to write it as
+Linear does; where fix leaves it, put the text on one line or start a new
+paragraph. Linear keeps the break but drops the backslash: it holds every
+line ending of a paragraph as a line break and writes it as a plain line
+ending, which other Markdown renderers join into one line.
 
 ```markdown
 First line\
 Second line
 ```
 
-Instead, end the line with two spaces or `<br>` (both kept as they are), or
-start a new paragraph.
+`fix` writes this as `First line`, then `Second line` on the next line.
+Spaces or a tab before the backslash stay. To keep the break for other
+renderers too, end the line with two spaces instead: Linear keeps them.
+
+`fix` leaves the file to you wherever dropping the backslash would change
+the document:
+in a setext heading, which it writes on one line (see
+[`hard-break-in-heading`](#hard-break-in-heading)); where the backslash is
+alone on its line, or right after a task checkbox; where the line would
+read differently without its backslash (`#\`, `***\`, a `=` or `---`
+underline, a table row, emphasis that the backslash lets close); and where
+the break sits next to an image, which `fix` moves into a paragraph of its
+own. There you can also end the line with two spaces or `<br>` yourself,
+if the line still reads as you meant. A hook that trims trailing
+whitespace in Markdown files removes those spaces, and with them the
+break: exclude Markdown from it (see [Other fixing hooks](#other-fixing-hooks)).
+
+### `setext-heading-lines`
+
+Linear keeps only the first line of a heading underlined with = or - as the
+heading; the lines after it become a paragraph. Put the heading text on one
+line. `fix` would otherwise write the heading on one line, which is not what
+Linear makes of it, so it leaves the file to you. Like
+[`hard-break-in-heading`](#hard-break-in-heading), the rule stops only `fix`:
+the sync sends such a file as it is, since Linear's own export of a rule,
+text lines and another rule reads as such a heading. A line break inside a
+code span is a space and keeps one heading.
+
+```markdown
+Plan
+for May
+========
+```
+
+### `table-header-pipe`
+
+A table whose header row has no | is plain text in Linear. Write the header
+row between pipes, as | Total |. Markdown reads a one-column table from a
+header line without pipes over a delimiter row with them, but Linear keeps
+all of its lines as text. The rule stops only `fix`; the sync sends such a
+file as it is.
+
+```markdown
+Total
+| --- |
+| 5 |
+```
+
+### `hard-break-in-heading`
+
+A hard line break in a setext heading is lost when the heading is written
+as one line. Put the heading on one line, or move the text after the break
+below it. Below the heading, that text becomes a paragraph.
+`lint` reports the break's line and `fix` leaves the file as written.
+Each `␠` below represents a trailing space.
+
+```text
+Paper lanterns␠␠
+Above the gate
+==============
+```
+
+A backslash break is reported as `hard-break-backslash`.
+
+### `tab-reference-layout`
+
+Linear writes tab character references as literal tabs. Fix leaves this
+document as-is because a tab would change how Markdown reads it. Reword the
+text or use ordinary spacing.
+
+In this example Markdown reads the tab as part of the list indentation.
+The sync sends the file as written.
+
+```markdown
+1. &#9;Collect the seeds.
+```
 
 ### `git-conflict-marker`
 
 Git conflict marker lines are rewritten as headings, quotes or collapsible
-sections. An unresolved merge would reach Linear mangled.
+sections. Resolve the conflict. An unresolved merge would reach Linear
+mangled. Marker lines inside code (fences, indented code and inline code)
+are text and pass.
 
 ```markdown
 <<<<<<< ours
@@ -453,8 +782,27 @@ The meeting is on Tuesday.
 >>>>>>> theirs
 ```
 
-Instead, resolve the conflict. Marker lines inside code (fences, indented
-code and inline code) are text and pass.
+### `section-opener`
+
+A line starting with >>> opens a collapsible section in Linear, which fix
+cannot write here: the file also has lines starting with +++, which Linear
+pairs with it, or the section would end inside code. Write the section with
++++ lines, or start the line with \>.
+
+Elsewhere `fix` writes a `>>>` line as Linear's section (see
+[What `fix` changes](#what-fix-changes)).
+
+```markdown
++++ Earlier notes
+
+Kept from last week.
+
++++
+
+>>> New notes
+
+Added today.
+```
 
 ### `url-in-html`
 
@@ -469,23 +817,69 @@ any URL and any `src` or `href` attribute in an HTML block or tag.
 Instead, use Markdown with an image file of the repository:
 `![Banner](images/banner.png)`.
 
+### `unplaced-link`
+
+A web address Markdown finds inside other text, such as "www.example.com" in
+quotes, cannot be matched to its text in the source, for example because an
+escape or a character reference spells it, so fix cannot write it as a link.
+Write it in angle brackets or as a link. For example,
+`<https://www.example.com/a_b>` is a link `fix` writes. Until then, `fix`
+leaves the file as it is; the sync sends it unchanged.
+
+```markdown
+See "www.example.com/a\_b" for details.
+```
+
+### `list-after-item-text`
+
+In a list item, Linear writes a list on the line right below the text or
+the list of another kind before it. When its first item is empty, starts
+with a list, or is numbered other than 1, Markdown reads that marker as
+part of the text above. Start the list with an item of text, numbered 1 in
+a numbered list. Linear keeps the list itself; only its written form reads
+differently, so no form `fix` could write matches both. The rule stops
+only `fix`; the sync sends such a file as it is.
+
+```markdown
+1. Plan
+
+   2.
+      * Call the team
+```
+
 ### `block-first-in-list-item`
 
-A list item that starts with a heading, code or quote is written in a form
-Markdown reads as an empty item. Linear writes the marker, a blank line and
-the indented block, so the block falls out of the list.
+A list item that starts with a heading, code, a quote or another block is
+written in a form Markdown reads as an empty item. Start the item with a
+line of text and put the block below it. Before such a block Linear adds
+an empty paragraph and writes the marker, a blank line and the indented
+block, so the block falls out of the list. `fix` cannot
+choose the text the item should start with, so it leaves the file to you.
+A list that starts an item (`* * a`, `1. 2.`) is no finding: `fix` writes
+it below the marker line, as Linear does.
 
 ```markdown
 * ## Step one
   Install the tools.
 ```
 
-Instead, start the item with a line of text and put the block below it.
+### `ordered-task-list`
+
+An ordered task list becomes a bullet task list. Use a bullet task list, or
+an ordered list without checkboxes. Linear's task lists have no numbers, so
+the items lose their order numbers; a task item anywhere in an ordered list
+counts.
+
+```markdown
+1. [ ] Draft the outline
+2. [x] Pick a date
+```
 
 ### `image-not-in-repository`
 
 An image must be a relative path to a file of the repository, not a URL,
-an absolute path or a path outside it. The sync uploads the files a
+an absolute path or a path outside it. Add the file to the repository and
+link it by its relative path. The sync uploads the files a
 document's images name; an image anywhere else would depend on the reader's
 network and on what Linear does with it. Linear has kept such an image,
 copied it to an upload of its own, and, most recently, kept only its alt
@@ -498,9 +892,9 @@ repository. Plain links to URLs are not affected.
 ![Revenue chart](https://example.com/charts/revenue.png)
 ```
 
-Instead, add the image file to the repository, in the same pull request,
-and link it by its relative path: `![Revenue chart](images/revenue.png)`.
-A file stored with Git LFS counts like any other.
+Add the file in the same pull request, for example as
+`![Revenue chart](images/revenue.png)`. A file stored with Git LFS counts
+like any other.
 
 ### `image-file-missing`
 
@@ -600,8 +994,11 @@ toolchain or packages when they install or run.
 A hook that rewrites the same Markdown in another way fights `fix`, and
 the two never settle. The common ones are `end-of-file-fixer`, which adds
 back the final line break `fix` removes, and `trailing-whitespace`, which
-removes the two spaces of a line break. Keep them away from synchronized
-Markdown files:
+removes the two spaces of a line break, the indentation `fix` writes on
+a blank line inside a code block in a list item, and the space after
+`+++` that Linear stores on an untitled section opener. An editor that trims
+trailing whitespace on save does the same. Keep them away from
+synchronized Markdown files:
 
 ```yaml
   - repo: https://github.com/pre-commit/pre-commit-hooks

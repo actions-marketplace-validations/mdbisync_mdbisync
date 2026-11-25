@@ -8,10 +8,10 @@ import { join, posix } from 'node:path';
 import { isMap, parseDocument, stringify } from 'yaml';
 import { isMarkdownPath, placeOf, readAnnotation, findFrontMatter, TEAM_KEY, PROJECT_KEY } from '../mapping/index.ts';
 import { checkMappingBudget, mapTree } from '../mapping/mapping.ts';
-import { resolveTargets } from '../setup/linear.ts';
+import { pendingProject, resolveTargets } from '../setup/linear.ts';
 import { nearestZone, folderOf } from '../mapping/annotations.ts';
 import { MAPPING_FILE_BYTES, MAPPING_TREE_BYTES, MappingBlobBudget, readableBlob } from '../mapping/blobs.ts';
-import { fixLinearText, joinFile, linkedFileCheck, lintInTree, sameMarkdown, splitFile } from '../format/index.ts';
+import { fixLinearText, joinFile, linkedFileCheck, lintInTree, sameAsLinear, splitFile } from '../format/index.ts';
 import { type LinearDocument, type StopReason, LinearError, LinearStoppedError, describeLinearError, isTransientLinearError } from '../linear/index.ts';
 import { renderStop } from '../run/stop.ts';
 import { documentUrlBase, hasDocumentLinks, linksFromLinear, linksLinearDocuments, linksToLinear, workspaceUrlKey, type LinkSpellings } from '../initial-sync/links.ts';
@@ -19,6 +19,7 @@ import { MarkdownLimitError, markdownBaseline } from '../format/markdown.ts';
 import { annotatedPlaces, placeId } from '../initial-sync/plan.ts';
 import { type RunContext } from '../run/preflight.ts';
 import { containersOf } from '../run/capacity.ts';
+import { lineText } from '../run/output.ts';
 import { type CommitIdentity, type IdEntry, type Git, GitLfsMissingError, lfsPush, lfsRemote, type StateConfig, type StateSnapshot, type Oid, commitTree, commitIds, commitUploads, pushAtomic, stateRef, listTree, parseLfsPointer, readIds, readReservedIds, readSupersededIds, readUploads, signObservation, UPLOADS_REBUILDING } from '../state/index.ts';
 import { checkTitle, securityGate, type SecurityGate, type SecurityFinding } from './security.ts';
 import { MARKS, type ConflictNotices, markWritesLinear, noConflictNotices, reconcileDocumentMark, releasedHold, type BlockedFinding } from './marks.ts';
@@ -150,6 +151,14 @@ export async function capture(context: RunContext, options: CaptureOptions): Pro
     const blobBudget = new MappingBlobBudget();
     const entries = await listTree(git, base, MAPPING_TREE_BYTES);
     const recorded = await mapTree(git, entries, blobBudget);
+    // An already synchronized project that disappeared may have been renamed or made inaccessible.
+    // Treating its folder as newly empty would capture removals of its documents.
+    for (const zone of recorded.zones.values()) {
+      const place = placeOf(zone);
+      if (place.kind === 'project' && pendingProject(targets, place)) {
+        throw new Error(message('sync.recorded-project-missing', { project: lineText(place.project), team: lineText(place.team) }));
+      }
+    }
     const zones = new Map(mapping.zones);
     let changedPlace = false;
     for (const [folder, old] of recorded.zones) {
@@ -163,9 +172,10 @@ export async function capture(context: RunContext, options: CaptureOptions): Pro
     }
     if (changedPlace) {
       mapping = {...mapping, zones};
-      const resolved = await resolveTargets(linear, zones.values());
+      const current = targets;
+      const resolved = await resolveTargets(linear, [...zones.values()].filter((zone) => !pendingProject(current, placeOf(zone))));
       if (resolved.targets === undefined) throw new Error(message('sync.places-unresolved'));
-      targets = resolved.targets;
+      targets = { ...resolved.targets, ...(current.pendingProjects === undefined ? {} : { pendingProjects: current.pendingProjects }) };
     }
     // The recorded state comes from refs any writer can move: a file's place only it names is read when the tracked
     // branch held the file synchronized there.
@@ -206,7 +216,7 @@ export async function capture(context: RunContext, options: CaptureOptions): Pro
     };
     const listed = new Map<string, LinearDocument>();
     const folders = new Map<string, string>();
-    const places = annotatedPlaces(mapping.zones).map(({place, folder}) => {
+    const places = annotatedPlaces(mapping.zones).filter(({place}) => !pendingProject(targets, place)).map(({place, folder}) => {
       const resolved = placeId(targets, place);
       folders.set(placeKeyOf(resolved), folder);
       return resolved;
@@ -564,8 +574,8 @@ export async function capture(context: RunContext, options: CaptureOptions): Pro
       // in Linear. A changed document is written in the form the `linear-format` hook leaves as it is.
       // Compared again only when other link targets change the body.
       if (candidate.compared?.body !== body) {
-        const unchanged = candidate.previousBody !== undefined && sameMarkdown(candidate.previousBody, body);
-        const text = unchanged ? joinFile(candidate.head, candidate.previousBody!) : fixLinearText(joinFile(candidate.head, body), candidate.doc.content ?? '', linkedFileCheck(candidate.path, (file) => mapping.files.has(file)));
+        const unchanged = candidate.previousBody !== undefined && sameAsLinear(body, candidate.previousBody);
+        const text = unchanged ? joinFile(candidate.head, candidate.previousBody!) : fixLinearText(joinFile(candidate.head, body), candidate.doc.content ?? '', linkedFileCheck(candidate.path, (file) => mapping.files.has(file)), candidate.previousBody);
         candidate.compared = {body, text};
       }
       return candidate.compared.text;

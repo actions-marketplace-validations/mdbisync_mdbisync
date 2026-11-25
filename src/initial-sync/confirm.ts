@@ -26,7 +26,7 @@
 
 import { assessCapacity, capacityBlocked } from '../run/capacity.ts';
 import { createHash, randomUUID } from 'node:crypto';
-import { fixText, joinFile, sameMarkdown, splitFile } from '../format/index.ts';
+import { fixText, joinFile, sameAsLinear, splitFile } from '../format/index.ts';
 import {
   DocumentTooLongError,
   type LinearDocument,
@@ -71,6 +71,7 @@ import { detectConflicts } from '../merge/index.ts';
 import { type ConflictNotices, MARKS, noConflictNotices, reconcileDocumentMark } from '../sync/marks.ts';
 import { matchesObservedBody, observedDigest, withRecorded } from '../sync/recorded.ts';
 import { stableId } from '../sync/stable-id.ts';
+import { createPendingProjects } from '../setup/linear.ts';
 import { message } from '../messages.ts';
 import { type LeftOutAtWriteRule, type WriteCode } from '../codes.ts';
 
@@ -261,6 +262,7 @@ export async function confirmInitialSync(context: RunContext, options: ConfirmOp
     result.notAttempted = [...plan.create, ...plan.overwrite, ...plan.trash].map((entry) => entry.path).sort();
     return { plan, result };
   }
+  await createPendingProjects(linear, targets);
 
   /** Each remembered document, as Linear returned it or listed it. */
   const rememberedDocuments = new Map<string, LinearDocument>();
@@ -647,7 +649,7 @@ function sha256(text: string): string {
  * or the body in the form Linear stores (as the format module writes it).
  */
 export function holdsBody(content: string, body: string): boolean {
-  return sameMarkdown(content, body) || content === fixText(body);
+  return sameAsLinear(content, body) || content === fixText(body);
 }
 
 

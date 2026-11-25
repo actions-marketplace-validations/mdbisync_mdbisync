@@ -1,16 +1,20 @@
-// `lint`: finds the Markdown that Linear would lose or alter, with file, line
+// `lint`: finds Markdown that formatting or sync would lose or alter, with file, line
 // and rule. Conflict markers written by the sync are one-line warning
 // callouts (bold paragraphs in earlier versions) and pass. Every image must be a file of the repository: Linear
 // cannot be trusted to keep, or to reach, an image anywhere else.
 
-import type { Definition, ImageReference, LinkReference, Root, Table } from 'mdast';
+import type { Definition, ImageReference, LinkReference, Nodes, PhrasingContent, Root, Table } from 'mdast';
 import { CONTENT_LIMIT, LINT_RULES, type Finding, type LintRule } from './rules.ts';
 import { ASSETS_FOLDER } from '../sync/upload-type.ts';
-import { allowedLink, bracketedLabel, MARKDOWN_MAX_NODES, MarkdownLimitError, end, imageDestination, line, lineCount, linkDestination, parse, resolveTarget, splitFile, start, visit } from './markdown.ts';
+import { allowedLink, bracketedLabel, listKind, opensWithText, MARKDOWN_MAX_NODES, MarkdownLimitError, end, imageDestination, line, lineCount, linkDestination, parse, resolveTarget, splitFile, start, visit } from './markdown.ts';
+import { unwritableSectionLine } from './sections.ts';
+import { tabReferences } from './tab-reference.ts';
 
 const GIT_MARKER = /^ {0,3}(?:<{7}|>{7})(?: |$)/;
 const QUOTE_PREFIX = /^ {0,3}> ?/;
 const ATX_HEADING = /^#{1,6}(?:[ \t]|$)/;
+const FIX_ONLY_RULES: ReadonlySet<LintRule> = new Set<LintRule>(['hard-break-in-heading', 'list-after-item-text', 'setext-heading-lines', 'table-header-pipe', 'table-list-cell', 'tab-reference-layout', 'unplaced-link']);
+const LIST_CELL = /^(?:[*+-]|\d{1,9}\))(?:[ \t]|$)/;
 const LINK_ATTRIBUTE = /\b(?:src|href)\s*=/i;
 const SCHEME_CHARACTER = /[a-z0-9+.-]/i;
 const LETTER = /[a-z]/i;
@@ -47,7 +51,14 @@ export function linkedFileCheck(documentPath: string, isFile: (path: string) => 
  * path. The sync lints every document it reads this way.
  */
 export function lintInTree(file: string, text: string, files: ReadonlySet<string>): Finding[] {
-  return lintText(file, text, { linkedFileExists: linkedFileCheck(file, (path) => files.has(path)) });
+  const findings = lintText(file, text, { linkedFileExists: linkedFileCheck(file, (path) => files.has(path)) });
+  // The heading rules guard the formatter's ATX conversion. The sync can
+  // preserve setext text and uses historical versions to verify writes.
+  // The setext and table rules report text Linear reads differently from
+  // Markdown, but Linear's own export can hold it (a rule, text lines and a
+  // rule; a list in a table cell): a document Linear wrote is not left out.
+  // `unplaced-link` stops only `fix`: the sync sends the text as it is.
+  return findings.filter((finding) => !FIX_ONLY_RULES.has(finding.rule));
 }
 
 /** Lint findings for one file's text, ordered by line. */
@@ -81,6 +92,8 @@ export function lintText(file: string, text: string, options: LintOptions = {}):
     return sorted();
   }
   lintTree(file, tree, content, report, options);
+  const { unsafeLine } = tabReferences(content);
+  if (unsafeLine !== undefined) report('tab-reference-layout', unsafeLine);
   return sorted();
 }
 
@@ -184,7 +197,7 @@ function paddingCells(table: Table): number {
 }
 
 /** Whether the text has more Unicode code points than `CONTENT_LIMIT`, counted without copying it. */
-function overContentLimit(text: string): boolean {
+export function overContentLimit(text: string): boolean {
   if (text.length <= CONTENT_LIMIT) return false;
   let count = 0;
   for (const _ of text) if (++count > CONTENT_LIMIT) return true;
@@ -212,6 +225,8 @@ function lintTree(file: string, tree: Root, body: string, report: (rule: LintRul
     return;
   }
   visit(tree, (node, ancestors) => {
+    // The bare-URL search inside text left a link it could not place in the source (`parse`).
+    if (node.type === 'link' && node.position === undefined) report('unplaced-link', unplacedLine(node, ancestors));
     switch (node.type) {
       case 'code':
       case 'inlineCode':
@@ -229,15 +244,58 @@ function lintTree(file: string, tree: Root, body: string, report: (rule: LintRul
         break;
       case 'break':
         if (body[start(node)] === '\\') report('hard-break-backslash', line(node));
+        else if (ancestors.some((a) => a.type === 'heading')) report('hard-break-in-heading', line(node));
         break;
       case 'listItem': {
+        // `fix` writes a list that starts an item on the next line, as Linear does.
         const [first] = node.children;
-        if (first !== undefined && first.type !== 'paragraph') report('block-first-in-list-item', line(first));
+        if (first !== undefined && first.type !== 'paragraph' && first.type !== 'list') report('block-first-in-list-item', line(first));
+        // In an item, Linear writes a list on the line below the text or the
+        // list of another kind before it. Markdown reads its first marker
+        // there as text when it cannot interrupt a paragraph.
+        // A first item that starts with another block is block-first-in-list-item.
+        node.children.forEach((child, index) => {
+          const previous = node.children[index - 1];
+          if (child.type !== 'list' || opensWithText(child) || !['paragraph', 'list'].includes(child.children[0]?.children[0]?.type ?? 'paragraph')) return;
+          const below = previous?.type === 'paragraph'
+            || (previous?.type === 'list' && listKind(previous, previous.children.at(-1)) !== listKind(child, child.children[0]));
+          if (below && endsWithParagraph(previous)) report('list-after-item-text', line(child));
+        });
+        // Markdown can hold a task item and a bullet item in one list, which
+        // Linear (and `fix`) writes as two lists, the second on the next line.
+        for (const list of node.children) {
+          if (list.type !== 'list') continue;
+          list.children.forEach((item, index) => {
+            const previous = list.children[index - 1];
+            if (previous === undefined || listKind(list, previous) === listKind(list, item)) return;
+            if (item.children[0] !== undefined && item.children[0].type !== 'list') return;
+            if (endsWithParagraph(previous)) report('list-after-item-text', line(item));
+          });
+        }
         break;
       }
-      case 'table':
-        if (node.align?.some((align) => align !== null)) report('table-alignment', line(node));
+      case 'list': {
+        // Linear's task list has no numbers: a task item in an ordered list
+        // ends up in a bullet task list.
+        const task = node.ordered ? node.children.find((item) => item.checked !== null && item.checked !== undefined) : undefined;
+        if (task !== undefined) report('ordered-task-list', line(task));
         break;
+      }
+      case 'heading': {
+        // Linear keeps a setext heading's text up to its first line break
+        // in text as the heading and reads the rest as a paragraph below
+        // it. A line break in a code span is a space there: such a heading
+        // stays one heading.
+        if (node.children.some((child) => softBreakInText(child, body))) report('setext-heading-lines', line(node));
+        break;
+      }
+      case 'table': {
+        if (node.align?.some((align) => align !== null)) report('table-alignment', line(node));
+        // Linear needs a pipe in the header row: without one the table is text.
+        const lineEnd = body.indexOf('\n', start(node));
+        if (!body.slice(start(node), lineEnd === -1 ? undefined : lineEnd).includes('|')) report('table-header-pipe', line(node));
+        break;
+      }
       case 'tableCell': {
         // Linear reads heading syntax that starts a body cell as a heading:
         // a lone `#` or `##` becomes an empty one, and `# Total` one holding
@@ -252,6 +310,11 @@ function lintTree(file: string, tree: Root, body: string, report: (rule: LintRul
         if (heading && table?.type === 'table' && table.children[0] !== row) {
           report('table-hash-cell', line(node));
         }
+        // Linear also reads a list marker that starts a body cell as a
+        // list, and writes it as `*` or `N.`: `+ fee` comes back `* fee`.
+        // A number and a dot keep their text; an escaped marker stays text.
+        const list = first?.type === 'text' && last !== undefined && LIST_CELL.test(body.slice(start(first), end(last)));
+        if (list && table?.type === 'table' && table.children[0] !== row) report('table-list-cell', line(node));
         break;
       }
       case 'text':
@@ -306,6 +369,29 @@ function lintTree(file: string, tree: Root, body: string, report: (rule: LintRul
       rest = rest.slice(prefix[0].length);
     }
   });
+  const section = unwritableSectionLine(body);
+  if (section !== undefined) report('section-opener', section);
+}
+
+/**
+ * The line of a link the bare-URL search could not place. The text it came
+ * from starts at the end of the placed sibling before it, or else at the
+ * start of its parent; each line break in the text before the link is one
+ * line further.
+ */
+function unplacedLine(node: Nodes, ancestors: readonly Nodes[]): number {
+  const parent = ancestors.at(-1);
+  let breaks = 0;
+  if (parent !== undefined && 'children' in parent) {
+    const siblings: readonly Nodes[] = parent.children;
+    for (let index = siblings.indexOf(node) - 1; index >= 0; index--) {
+      const sibling = siblings[index]!;
+      if (sibling.position !== undefined) return sibling.position.end.line + breaks;
+      if (sibling.type === 'text') breaks += sibling.value.split('\n').length - 1;
+    }
+  }
+  const placed = ancestors.findLast((ancestor) => ancestor.position !== undefined);
+  return (placed === undefined ? 1 : line(placed)) + breaks;
 }
 
 /**
@@ -373,4 +459,19 @@ function hasUrlOrLinkAttribute(html: string): boolean {
     }
   }
   return false;
+}
+
+/** Whether the phrasing content's text runs over a line ending of the source, not in code or HTML (`&#10;` is no line ending). */
+function softBreakInText(node: PhrasingContent, body: string): boolean {
+  if (node.type === 'text') return body.slice(start(node), end(node)).includes('\n');
+  return 'children' in node && (node.children as PhrasingContent[]).some((child) => softBreakInText(child, body));
+}
+
+/**
+ * Whether a paragraph ends the block: the last block, through lists, items
+ * and quotes, a marker on the next line would continue as text.
+ */
+function endsWithParagraph(node: Nodes | undefined): boolean {
+  while (node !== undefined && (node.type === 'list' || node.type === 'listItem' || node.type === 'blockquote')) node = node.children.at(-1);
+  return node?.type === 'paragraph';
 }

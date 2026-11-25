@@ -50,6 +50,7 @@ step with the bare message, without `error:`.
 | `<command>: stopped before any write (<code>): <detail>` | The setup check, or the sync's state, stopped the run before it wrote anything. The code is one of the [setup check codes](#setup-check) or [sync state codes](#sync-state). When the quickstart has a section that fixes it, the line ends with `. How to fix it: <link>`. |
 | `warning: <command>: partial, will continue (<code>)` | A sync run did part of its work and recorded what it finished. The next sync run goes on from there; nothing to do unless it repeats. See [Partial sync runs](#partial-sync-runs). |
 | `<command>: stopped by Linear before any write; run it again once the limit has reset` | Linear's rate limit stopped an initial sync or a check before it wrote anything. Wait for the reset time in the job summary and run it again. |
+| `<command>: stopped by Linear while creating projects. Run it again once the limit has reset` | Wait for the reset time in the job summary, then run again. The run reuses projects already created. |
 | `<command>: stopped before any write (container-cap); reduce additions or check document-cap` | See [`container-cap`](#container-cap). |
 | `<command>: not finished (<code>); run it again with the same inputs` | An initial sync stopped part way. Run it again with the same direction and `confirm`; it skips what it already did. See [Initial sync](#initial-sync). |
 | `<command>: not finished (sync-branch-changed); merge or close the pull request of the sync branch and delete the branch, then run it again` | See [`sync-branch-changed`](#initial-sync). |
@@ -344,7 +345,7 @@ the reason is fixed. The summaries list each with its rules:
 | --- | --- | --- |
 | `duplicate-title` | Two or more files map to one document title (their names differ only in letter case or Unicode normalization). | Rename all but one of them. |
 | `title-too-long` | The title made from the file's path is longer than Linear accepts. | Use a shorter file name or folder path. |
-| `content-too-long` | The text is longer than the 250,000 characters Linear accepts. Its other rules are not checked until it is shorter. | Split the file, then lint the parts. |
+| `content-too-long` | The body exceeds Linear's 250,000-character limit. This can happen after formatting, or when sync writes the file's links to other documents as Linear URLs, which are longer than the relative paths; `lint` does not see that growth. | Shorten or split the file, leaving room for its links' URLs, then sync again. See [the format rule](linear-format.md#content-too-long). |
 | `markdown-complexity` | The Markdown tree exceeds 128 levels or 500,000 nodes, padding a table's short rows to its header width would add over 250,000 characters or take it past that node limit, writing each reference link's destination in full would take the text over 250,000 characters, or a paragraph's inline syntax, or its many lines continued without their quote or list prefix, would take too long to parse. | Reduce nesting, fill in or split the table, write fewer references to a long destination, split long paragraphs with blank lines or write the quote or list prefix on each of their lines, or split the file. |
 | `changed-during-run` | An initial sync found the document changed in Linear while it ran: moved to another team or project, renamed, trashed, archived, edited or gone. The document and the file its title names are neither written, trashed nor imported. A document without a file is listed as `<folder>/<document id>.md`: find it by that id. In a sync, a document the run was about to mark, or to give its own icon and color back, was moved out of the place the run read it in (or trashed, archived or removed) first: the run does not mark, comment on or restore it, a blocked document's record stays as it was, and the capture cursor holds. | Run the initial sync again. After a sync, nothing: the next run reads the document again. |
 | `outside-annotations` | The file is above every annotated folder. | Move it into an annotated folder, or annotate a folder above it. |
@@ -369,11 +370,25 @@ the reason is fixed. The summaries list each with its rules:
 
 The `linear-format` hook's rules leave a file out too until it is fixed:
 `footnote`, `subscript`, `table-escaped-pipe`, `table-hash-cell`,
-`image-in-link`, `table-alignment`, `link-title`, `image-title`,
-`code-in-emphasis`, `hard-break-backslash`, `git-conflict-marker`,
-`url-in-html`, `block-first-in-list-item`, `image-not-in-repository`,
-`image-file-missing` and `document-in-assets-folder`. Each is described,
-with its fix, in [linear-format.md](linear-format.md#lint-rules).
+`image-in-link`, `table-alignment`, `link-title`, `image-title`, `code-in-emphasis`, `hard-break-backslash`,
+`git-conflict-marker`,
+`section-opener`, `url-in-html`, `block-first-in-list-item`, `ordered-task-list`,
+`image-not-in-repository`, `image-file-missing` and
+`document-in-assets-folder`. Each is described, with its fix, in
+[linear-format.md](linear-format.md#lint-rules).
+
+`mdbisync lint` and `mdbisync fix` also report `hard-break-in-heading`
+when converting a setext heading to one line would lose a hard break, and
+`setext-heading-lines`, `table-header-pipe`, `table-list-cell` and
+`list-after-item-text` for text Linear reads differently from Markdown; the
+sync sends such a file as it is, since Linear's own export can hold that
+text. See [hard breaks in headings](linear-format.md#hard-break-in-heading)
+and the four rules in [linear-format.md](linear-format.md#lint-rules).
+They also report `unplaced-link` when `fix` cannot write a web address found
+inside other text as a link; the sync sends such a file as it is. See
+[unplaced links](linear-format.md#unplaced-link).
+The same applies to [`tab-reference-layout`](linear-format.md#tab-reference-layout)
+when reading a literal tab would change the Markdown.
 
 `mdbisync lint` run on a folder also reports `upload-file-refused` for a
 file an earlier sync captured from Linear (named `<sha256>.<ext>`) that the
@@ -449,6 +464,7 @@ step fails with the same message:
 | `the input <name> is required` | Set the input in the workflow, or its `MDBISYNC_*` environment variable on the command line. |
 | `the input repository must be "owner/name" (it defaults to the workflow's repository)` | Give `repository` as `owner/name`, or leave it empty in a workflow. |
 | `the input document-cap must be a positive safe integer` | Give a whole number above zero. |
+| `the input create-projects must be true or false` | Use `true` to enable project creation or `false` to leave it off. |
 | `the input merge-grace-seconds must be an integer from 0 to 120` | Give a whole number of seconds from 0 to 120. |
 | `the input check-deadline-minutes must be an integer from 10 to 1440` | Give a whole number of minutes from 10 to 1440. |
 | `` the input required-checks must name each check with the publisher it must come from, one per line, as `<name> @ actions` for a GitHub Actions job, `<name> @ app:<App id>` or `<name> @ status:<account id>`, with names of at most 255 characters; this line is not: … `` | Add the publisher to each line ([required checks](usage.md#required-checks)): `actions` for a GitHub Actions job, `app:` and the App's id for another App's check run, `status:` and the creating account's id for a commit status. A name alone is refused, because any account that may write commit statuses could post a check under that name. The GitHub Actions App's id is refused after `app:`: write `actions` instead. The `github-actions[bot]` account is refused after `status:`, because it posts the statuses of every workflow's token. List check names as GitHub shows them on a pull request, without control characters. |
@@ -497,6 +513,7 @@ the message. Most come from the workflow's configuration:
 | `unknown option: <flag>`, `<flag> needs a value`, `<flag> was given twice`, `choose security hooks once`, `choose Git LFS once` | Fix the flags; `mdbisync init --help` lists them. |
 | `--release-sha must be a full 40-character commit SHA`, `--release-version must be a version such as v1.2.3` | Give the release commit SHA and version (see [usage.md](usage.md#release-builds-and-pins)). |
 | `release <version> is older than <minimum>, the release these workflows are written for and checked against. Use <minimum> or later` | Pick `<minimum>` or a later release (see [`init`](configuration.md#init)): the workflows pass action inputs that the older release lacks. |
+| `--create-projects requires a release that supports the create-projects action input. Release <version> does not support it` | Pin a release that supports the input or omit the flag. |
 | `paths must stay inside the repository`, `setup destinations must not contain symlinks`, `a setup folder path names a regular file` | A file `init` writes (in `.github/workflows/`, `.pre-commit-config.yaml`, `.gitattributes`) or a folder on its path is a symbolic link, leads outside the repository, or is a regular file where a folder should be. Move it aside and run `init` again. |
 | `invalid YAML configuration`, `.pre-commit-config.yaml needs a repos list`, `invalid pre-commit repository entry` | Fix `.pre-commit-config.yaml`. |
 | `existing linear-format hook uses a different repository or release` | Update the hook's `rev` by hand to the release you pass, or pass the release it uses. |
@@ -520,6 +537,8 @@ document named.
 | `<operation>: <field> is <n> characters, Linear accepts at most <limit>` | A title or text is too long for Linear; see `title-too-long` and `content-too-long`. |
 | `<operation>: written, but reading back the stored record failed` | Linear took the write but the read that confirms it failed. The next run checks it. |
 | `<operation>: Linear reported another page without a cursor`, `<operation>: Linear reported success: false` | Linear answered in a way the run cannot use. Run again; report it if it repeats. |
+| `Could not create <project> in Linear (<reason>). Check its name and the app’s access, including any renamed or archived project, then run again.` | The job summary names the affected project and team. |
+| `Linear did not confirm project creation`, `Linear returned a different name for the created project` | Check the mapped team in Linear. If the project exists, verify its exact name against the folder's `linear-project` annotation before retrying. |
 | `oauth.token: Linear refused the token request (<reason>)` | Linear refused the app's credentials; see `linear-credential-failed`. |
 | `oauth.revoke: Linear did not confirm the revocation (HTTP <status>)`, `<operation>: request to Linear failed` | Revoking the run's token failed. |
 | `the run's Linear token could not be revoked: <error>`, `post: the run's Linear token could not be revoked: <error>` | A warning only: Linear expires the token on its own. The action's post step tries again after the run. |
@@ -530,6 +549,7 @@ document named.
 | `GitHub answered HTTP <status> while <what>`, `GitHub did not answer while <what>` | A GitHub request failed. `<what>` is one of: listing open pull requests, reading a pull request, opening a pull request, updating a pull request, closing a pull request, sending `<method>` to the pull request API, reading the check runs of the sync pull request, reading the commit statuses of the sync pull request, reading the annotations of a failed check run, merging the sync pull request. A failed read of a check run's annotations does not stop the run: the suspended documents' comments name that check without them, and the run summary says so. |
 | `git <arguments> failed with exit code <n>: <output>` | A git command failed; its own output follows. Often a network problem or missing rights to push. |
 | `refusing to move <ref> to a commit that does not descend from its current value` | A state ref or the sync branch was changed by hand. Undo that change, or recover with an initial sync. |
+| `previously synchronized project "<project>" of team "<team>" is missing in Linear. Restore access to the project or update its annotation before syncing` | Check whether the project was renamed, archived, or made inaccessible to the app. If the mapping needs to change, review a new [initial sync dry run](#recovery-with-initial-sync). |
 | `the recorded state names a Linear place for <folder> that is not a move the tracked branch made and the sync has not recorded yet; the state refs were changed outside the sync` | The state ref `linear` names a team or project for that folder (`<folder>` is the folder, or the repository root) other than its current one. Capture reads an old place only to finish a move: it must be the folder's place just before the tracked branch last changed its annotation, and no sync merged into the tracked branch since may have recorded the new place. Otherwise capture stops before reading any document. A folder the tracked branch moved twice before a sync recorded the first move stops here too: set its annotation back to the place the sync recorded, let a sync run, then move the folder to its new place in one change. Otherwise find out who pushed to the state refs, then recover with an initial sync. |
 
 ## Errors that point to a bug

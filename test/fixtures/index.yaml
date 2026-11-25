@@ -56,19 +56,121 @@ rules:
     title: "Bold or italic around inline code is dropped from the code."
   - id: hard-break-backslash
     title: "A backslash line break becomes a plain line break."
+  - id: hard-break-in-heading
+    title: "A hard line break in a setext heading is lost when the heading is written as one line."
+  - id: tab-reference-layout
+    title: "A literal tab would change how Markdown reads the document."
   - id: git-conflict-marker
     title: "Git conflict marker lines are rewritten as headings, quotes or collapsible sections."
+  - id: section-opener
+    title: "A line starting with >>> opens a collapsible section that fix cannot write next to +++ lines."
   - id: url-in-html
     title: "A URL inside raw HTML is turned into a Markdown link."
   - id: block-first-in-list-item
-    title: "A list item that starts with a heading, code or quote is written in a form Markdown reads as an empty item."
+    title: "A list item that starts with a heading, code, a quote or another block is written in a form Markdown reads as an empty item."
+  - id: ordered-task-list
+    title: "An ordered task list becomes a bullet task list."
   - id: table-hash-cell
     title: "A table body cell starting with # becomes a heading."
   - id: image-not-in-repository
     title: "An image must be a relative path to a file of the repository, not a URL, an absolute path or a path outside it."
   - id: image-file-missing
     title: "An image must name a file that exists in the repository, not a folder or a Markdown document."
+  - id: table-list-cell
+    title: "A table body cell starting with -, + or * and a space, or with a number and ), becomes a list, which Linear writes with * or a number and a dot. Put a backslash before the -, + or *, or reword the cell."
+  - id: setext-heading-lines
+    title: "Linear keeps only the first line of a heading underlined with = or - as the heading; the lines after it become a paragraph. Put the heading text on one line."
+  - id: table-header-pipe
+    title: "A table whose header row has no | is plain text in Linear. Write the header row between pipes, as | Total |."
+  - id: list-after-item-text
+    title: "In a list item, Linear writes a list on the line right below the text or the list of another kind before it, where Markdown reads a first marker that cannot interrupt a paragraph as text."
 known_constructs:
+  - construct: heading-empty
+    class: fixable
+  - construct: quote-empty
+    class: fixable
+  - construct: nbsp-space-number
+    class: fixable
+  - construct: setext-heading-lines
+    class: lint-error
+  - construct: item-section-run
+    class: fixable
+  - construct: table-one-column
+    class: fixable
+  - construct: table-header-no-pipe
+    class: lint-error
+  - construct: table-cell-markers
+    class: lint-error
+  - construct: table-cell-escaped-markers
+    class: fixable
+  - construct: list-kinds
+    class: fixable
+  - construct: list-first-in-item
+    class: fixable
+  - construct: list-after-item-text
+    class: lint-error
+  - construct: space-reference
+    class: fixable
+  - construct: tab-reference
+    class: fixable
+  - construct: tab-reference-layout
+    class: lint-error
+  - construct: lone-backtick
+    class: fixable
+  - construct: adjacent-links
+    class: fixable
+  - construct: bare-url-endings
+    class: fixable
+  - construct: bold-link-suffix
+    class: fixable
+  - construct: adjacent-bold-boundaries
+    class: fixable
+  - construct: coextensive-bold-italic
+    class: fixable
+  - construct: line-start-escape
+    class: fixable
+  - construct: code-span-lazy-dash-line
+    class: fixable
+  - construct: nbsp
+    class: fixable
+  - construct: code-span-lines
+    class: fixable
+  - construct: table-document-end
+    class: fixable
+  - construct: code-blank-lines-before-fence
+    class: fixable
+  - construct: table-cell-br
+    class: fixable
+  - construct: literal-tilde
+    class: fixable
+  - construct: literal-underscore
+    class: fixable
+  - construct: continuation-hash
+    class: fixable
+  - construct: continuation-indent
+    class: fixable
+  - construct: empty-list-item
+    class: fixable
+  - construct: ordered-list-aligned-numbers
+    class: fixable
+  - construct: autolink-literal-backslash
+    class: fixable
+  - construct: lazy-underline-line
+    class: fixable
+  - construct: dash-only-line
+    class: fixable
+  - construct: line-start-marker
+    class: fixable
+  - construct: link-destination-unsafe-characters
+    class: fixable
+  - construct: link-destination-non-ascii
+    class: fixable
+  - construct: collapsible-section-opener
+    class: fixable
+  - construct: backslash-block-end
+    class: fixable
+  - construct: section-opener-with-section-lines
+    class: lint-error
   - construct: sync-conflict-markers
     class: unchanged
   - construct: sync-conflict-callouts
@@ -249,6 +351,14 @@ known_constructs:
     class: fixable
   - construct: heading-in-list
     class: lint-error
+  - construct: task-list-ordered
+    class: lint-error
+  - construct: ordered-item-number-escaped
+    class: unchanged
+  - construct: item-text-block-starters
+    class: fixable
+  - construct: paragraph-block-starters
+    class: fixable
   - construct: task-in-quote
     class: fixable
   - construct: math-in-list
@@ -583,6 +693,10 @@ known_constructs:
     class: fixable
   - construct: image-inline-text
     class: fixable
+  - construct: image-split-text-after
+    class: fixable
+  - construct: image-split-text-before
+    class: fixable
   - construct: image-shared
     class: unchanged
   - construct: image-several
@@ -693,6 +807,34 @@ assets:
     kind: ogg
     corpus: false
 fixtures:
+  - file: links/bare-url-endings.md
+    group: links
+    construct: bare-url-endings
+    class: fixable
+    basis: known
+    canary: kx-73d145bc
+    corpus: false
+  - file: links/bold-link-suffix.md
+    group: links
+    construct: bold-link-suffix
+    class: fixable
+    basis: known
+    canary: kx-614f27ab
+    corpus: false
+  - file: construct-singles/adjacent-bold-boundaries.md
+    group: construct-singles
+    construct: adjacent-bold-boundaries
+    class: fixable
+    basis: known
+    canary: kx-0fac73b9
+    corpus: false
+  - file: construct-singles/coextensive-bold-italic.md
+    group: construct-singles
+    construct: coextensive-bold-italic
+    class: fixable
+    basis: known
+    canary: kx-ca327165
+    corpus: false
   - file: "construct-singles/heading-atx-h1.md"
     group: construct-singles
     construct: heading-atx-h1
@@ -1043,6 +1185,15 @@ fixtures:
     line: 1
     basis: known
     canary: kx-0d10d55c
+  - file: "construct-singles/break-backslash-indented.md"
+    group: construct-singles
+    construct: hard-break-backslash
+    class: lint-error
+    rule: hard-break-backslash
+    line: 1
+    basis: known
+    canary: kx-5a6d18c5
+    note: "the line after a backslash break loses its own indentation in Linear, and its start is escaped as at a line's start"
   - file: "construct-singles/break-html.md"
     group: construct-singles
     construct: hard-break-html
@@ -1516,10 +1667,9 @@ fixtures:
     construct: table-hash-escaped-body
     class: fixable
     basis: known
-    git_form: captured
     canary: kx-28002669
     corpus: false
-    note: "in fix's form; Linear keeps the escaped body hash as text and adds only a final newline after the table that ends the document, which the sync captures as fix's form"
+    note: "Linear keeps the escaped body hash as text and adds a final newline after the table that ends the document, as fix writes it"
   - file: "tables/table-hash-double-body.md"
     group: tables
     construct: table-hash-heading-body
@@ -1561,10 +1711,9 @@ fixtures:
     construct: table-quoted-end
     class: fixable
     basis: known
-    git_form: captured
     canary: kx-9e3d51a7
     corpus: false
-    note: "in fix's form; Linear adds a final newline after a quoted table that ends the document, as after any table that ends it, which the sync captures as fix's form"
+    note: "Linear adds a final newline after a quoted table that ends the document, as after any table that ends it, and so does fix"
   - file: "tables/table-inline-marks.md"
     group: tables
     construct: table-inline-marks
@@ -1843,6 +1992,14 @@ fixtures:
     class: fixable
     basis: known
     canary: kx-748a202d
+  - file: "links/bare-domain.md"
+    group: links
+    construct: autolink-literal
+    class: fixable
+    basis: known
+    canary: kx-79a561ce
+    corpus: false
+    note: "A public bare domain becomes an HTTP link, including the URL tail. Relative paths and standalone Markdown filenames stay as text."
   - file: "links/bare-url.md"
     group: links
     construct: autolink-literal
@@ -1853,11 +2010,27 @@ fixtures:
     group: links
     construct: autolink-literal-backslash
     class: fixable
-    basis: assumed
+    basis: known
     canary: kx-6d25b0a1
     corpus: false
-    probe_pending: true
     note: "a bare URL ending in a backslash, then a line holding only --: fix writes one link and keeps the rest once"
+  - file: "links/destination-unsafe-characters.md"
+    group: links
+    construct: link-destination-unsafe-characters
+    class: fixable
+    basis: known
+    canary: kx-83bf6cca
+    corpus: false
+    note: "Linear percent-encodes a backslash, |, ^, { and } in a link destination, also a bare URL's"
+  - file: "links/bare-url-inline-syntax.md"
+    group: links
+    construct: autolink-literal-inline-syntax
+    class: fixable
+    basis: assumed
+    canary: kx-c8a05149
+    corpus: false
+    probe_pending: true
+    note: "bare URLs with backslashes, plain intraword underscores, tilde pairs, asterisks and character references: the link text fix writes reads exactly as the URL"
   - file: "links/reference.md"
     group: links
     construct: link-reference
@@ -2279,6 +2452,26 @@ fixtures:
     class: unchanged
     basis: known
     canary: kx-5c7f9462
+  - file: "lint-errors/heading-setext-break-spaces.md"
+    group: lint-errors
+    construct: heading-setext-hard-break
+    class: lint-error
+    rule: hard-break-in-heading
+    line: 2
+    basis: assumed
+    canary: kx-8b147c0e
+    corpus: false
+    probe_pending: true
+  - file: "lint-errors/heading-setext-break-backslash.md"
+    group: lint-errors
+    construct: heading-setext-hard-break
+    class: lint-error
+    rule: hard-break-backslash
+    line: 1
+    basis: assumed
+    canary: kx-8b147c1e
+    corpus: false
+    probe_pending: true
   - file: "lint-errors/footnote.md"
     group: lint-errors
     construct: footnote
@@ -2453,6 +2646,22 @@ fixtures:
     class: fixable
     basis: known
     canary: kx-72e3775f
+  - file: "images/split-text-after-image.md"
+    group: images
+    construct: image-split-text-after
+    class: fixable
+    basis: known
+    canary: kx-87ee206c
+    corpus: false
+    note: "text after an inline image that starts like a heading, quote, rule, list, fence or definition stays a paragraph"
+  - file: "images/split-text-before-image.md"
+    group: images
+    construct: image-split-text-before
+    class: fixable
+    basis: known
+    canary: kx-6968019d
+    corpus: false
+    note: "text before an inline image whose last line is a === or --- underline or a table delimiter row stays a paragraph"
   - file: "images/shared-a.md"
     group: images
     construct: image-shared
@@ -2766,12 +2975,684 @@ fixtures:
     basis: assumed
     canary: kx-e82370e6
     synced: false
+  - file: "construct-singles/dash-only-lines.md"
+    group: construct-singles
+    construct: dash-only-line
+    class: fixable
+    basis: known
+    canary: kx-63c5fe20
+    corpus: false
+    note: "Linear escapes a paragraph line that starts with -; a lone == or === line stays"
+  - file: "construct-singles/line-start-markers.md"
+    group: construct-singles
+    construct: line-start-marker
+    class: fixable
+    basis: known
+    canary: kx-cbd5160c
+    corpus: false
+    note: "Linear escapes a - or * that starts a paragraph line, also after a soft break, in an item or a quote; + stays"
+  - file: "construct-singles/line-start-equals.md"
+    group: construct-singles
+    construct: line-start-escape
+    class: fixable
+    basis: known
+    canary: kx-9b470119
+    corpus: false
+    note: "Linear drops the escape of a run of = except where it would underline the paragraph above"
+  - file: "construct-singles/line-start-deep-indent.md"
+    group: construct-singles
+    construct: line-start-escape
+    class: fixable
+    basis: known
+    canary: kx-f4c3e32f
+    corpus: false
+    note: "Linear drops an escaped -, + or = after a paragraph continuation line's indentation where no block can start, in an item too"
+  - file: "construct-singles/line-start-number-in-item.md"
+    group: construct-singles
+    construct: line-start-escape
+    class: fixable
+    basis: known
+    canary: kx-5ef7ce6f
+    corpus: false
+    note: "Linear keeps an escaped number and dot on an indented line under a list item as text"
+  - file: "construct-singles/line-start-number-nbsp.md"
+    group: construct-singles
+    construct: line-start-escape
+    class: fixable
+    basis: known
+    canary: kx-86c060c9
+    corpus: false
+    note: "a number, dot and no-break space under a list item stays text, the dot escaped; after a tab it is a nested item"
   - file: "construct-singles/lazy-underline-line.md"
     group: construct-singles
     construct: lazy-underline-line
     class: fixable
-    basis: assumed
+    basis: known
     canary: kx-aafe6ed7
     corpus: false
-    probe_pending: true
     note: "a lazy -- or == line continues an item or quote paragraph; it must not underline it as a heading"
+  - file: "list-items/task-list-ordered.md"
+    group: list-items
+    construct: task-list-ordered
+    class: lint-error
+    rule: ordered-task-list
+    line: 1
+    basis: known
+    canary: kx-6b20d845
+    corpus: false
+    note: "Linear stores an ordered task list as a bullet task list: the numbers go"
+  - file: "list-items/ordered-item-number-escaped.md"
+    group: list-items
+    construct: ordered-item-number-escaped
+    class: unchanged
+    basis: known
+    canary: kx-f30fd3d5
+    corpus: false
+    note: "item text that starts like a list marker, escaped so it stays text"
+  - file: "list-items/item-text-block-starters.md"
+    group: list-items
+    construct: item-text-block-starters
+    class: fixable
+    basis: known
+    canary: kx-5af44b9a
+    corpus: false
+    git_form: captured
+    note: "item text that starts like a list marker or a block; Linear writes 4) and a lone + back without their escape, and capture puts it back"
+  - file: "construct-singles/paragraph-block-starters.md"
+    group: construct-singles
+    construct: paragraph-block-starters
+    class: fixable
+    basis: known
+    canary: kx-95881896
+    corpus: false
+    git_form: captured
+    note: "paragraph text that starts like a list marker or a block; Linear writes 4) and a lone + back without their escape, and capture puts it back"
+  - file: "construct-singles/image-alt-multiline-container.md"
+    group: construct-singles
+    construct: image-alt-multiline-container
+    class: fixable
+    basis: assumed
+    canary: kx-696a1cab
+    corpus: false
+    probe_pending: true
+    note: "an image's alt text runs over lines in a quote or list item, one of them a lazy -- line; the image, its alt text and its container must stay"
+  - file: "construct-singles/code-span-lazy-dash-line.md"
+    group: construct-singles
+    construct: code-span-lazy-dash-line
+    class: fixable
+    basis: known
+    canary: kx-cf6a2d71
+    corpus: false
+    note: "a lazy -- or == line inside a code span in a quote or list item joins the line before it, since a line ending in a code span reads as a space"
+  - file: "construct-singles/image-alt-code-bracket.md"
+    group: construct-singles
+    construct: image-alt-code-bracket
+    class: unchanged
+    basis: assumed
+    canary: kx-7aee425c
+    corpus: false
+    probe_pending: true
+    note: "a ] inside a code span of an image's alt text does not close the alt text"
+  - file: "list-items/list-form-empty-items.md"
+    group: list-items
+    construct: empty-list-item
+    class: fixable
+    basis: known
+    canary: kx-711fd64a
+    corpus: false
+    note: "Linear writes an empty bullet or numbered item with a space after its marker, also nested and in a quote"
+  - file: "list-items/list-form-empty-nested-items.md"
+    group: list-items
+    construct: empty-list-item
+    class: fixable
+    basis: known
+    canary: kx-3c5e81a2
+    corpus: false
+    note: "a paragraph's last line of only a number and dot, or a bullet, under an item at or past its content is text; Linear writes it as an empty item at the innermost item's content, with a space after it"
+  - file: "list-items/list-form-empty-item-numbered-lines.md"
+    group: list-items
+    construct: empty-list-item
+    class: fixable
+    basis: known
+    canary: kx-066b2922
+    corpus: false
+    note: "numbered lines after a bare marker on an item's second line: Linear reads the empty item and a list nested in it, or after it in its list, and writes the numbers unescaped"
+  - file: "list-items/list-form-ordered-ten.md"
+    group: list-items
+    construct: ordered-list-aligned-numbers
+    class: fixable
+    basis: known
+    canary: kx-942738f3
+    corpus: false
+    note: "Linear right-aligns the numbers of an ordered list to its widest one and lines up every item's content past it"
+  - file: "list-items/list-form-ordered-nested.md"
+    group: list-items
+    construct: ordered-list-aligned-numbers
+    class: fixable
+    basis: known
+    canary: kx-1d870ac8
+    corpus: false
+    note: "aligned numbers of an ordered list of ten items under a bullet, in a quote and under another such list"
+  - file: "list-items/list-form-ordered-hundred.md"
+    group: list-items
+    construct: ordered-list-aligned-numbers
+    class: fixable
+    basis: known
+    canary: kx-a649dff0
+    corpus: false
+    note: "an ordered list that passes 100 aligns its numbers to three digits"
+  - file: "tables/table-document-end.md"
+    group: tables
+    construct: table-document-end
+    class: fixable
+    basis: known
+    canary: kx-b97dc4be
+    corpus: false
+    note: "a document that ends with a table"
+  - file: "tables/table-document-end-item.md"
+    group: tables
+    construct: table-document-end
+    class: fixable
+    basis: known
+    canary: kx-db392236
+    corpus: false
+    note: "a document that ends with a table inside a list item"
+  - file: "construct-singles/code-blank-lines-before-fence.md"
+    group: construct-singles
+    construct: code-blank-lines-before-fence
+    class: fixable
+    basis: known
+    canary: kx-6fa81daf
+    corpus: false
+    note: "Linear drops a blank line before the closing fence of a top-level code block, keeps it in a quote and indents it in a list item"
+  - file: "construct-singles/code-blank-lines-document-end.md"
+    group: construct-singles
+    construct: code-blank-lines-before-fence
+    class: fixable
+    basis: known
+    canary: kx-69dfa3cf
+    corpus: false
+    note: "a document that ends with a code block whose last line is blank"
+  - file: "construct-singles/code-blank-lines-quoted-item.md"
+    group: construct-singles
+    construct: code-blank-lines-before-fence
+    class: fixable
+    basis: known
+    canary: kx-877287ad
+    corpus: false
+    note: "blank lines in a code block of a list item in a quote: Linear writes the quote marker and the item's indentation"
+  - file: "tables/table-cell-br.md"
+    group: tables
+    construct: table-cell-br
+    class: fixable
+    basis: known
+    canary: kx-5e968e11
+    corpus: false
+    note: "a line break in a table cell, written as <br>, <br/> and &#10;"
+  - file: "construct-singles/continuation-indent-paragraph.md"
+    group: construct-singles
+    construct: continuation-indent
+    class: fixable
+    basis: known
+    canary: kx-f7065a0f
+    corpus: false
+    note: "Linear keeps a paragraph continuation line's spaces or tab, in a quote after its marker too; after them it escapes a * but not a -"
+  - file: "construct-singles/continuation-indent-items.md"
+    group: construct-singles
+    construct: continuation-indent
+    class: fixable
+    basis: known
+    canary: kx-b134e62a
+    corpus: false
+    note: "an item's continuation line keeps its indentation past the item's content indent; a tab the item takes in part leaves its other columns as spaces"
+  - file: "construct-singles/continuation-indent-tabs.md"
+    group: construct-singles
+    construct: continuation-indent
+    class: fixable
+    basis: known
+    canary: kx-9d2f47b6
+    corpus: false
+    note: "tabs after the columns an item's prefix takes keep their place before text that reads like a list marker when the written prefix ends at the source's column"
+  - file: "construct-singles/continuation-indent-lazy.md"
+    group: construct-singles
+    construct: continuation-indent
+    class: fixable
+    basis: known
+    canary: kx-b3c45fd3
+    corpus: false
+    note: "a lazy line keeps its indentation for a quote and loses what an item's content indent takes"
+  - file: "construct-singles/continuation-indent-glued-numbers.md"
+    group: construct-singles
+    construct: continuation-indent
+    class: fixable
+    basis: known
+    canary: kx-13cbfd09
+    corpus: false
+    note: "a number with a dot or parenthesis and no space after it keeps the tabs after the columns an item's prefix takes; a lazy line of a number is written under its prefix alone"
+  - file: "construct-singles/continuation-bare-number.md"
+    group: construct-singles
+    construct: continuation-indent
+    class: fixable
+    basis: known
+    canary: kx-aefaaff0
+    corpus: false
+    note: "a paragraph line of only a number and dot before the paragraph's last line: Linear escapes it after spaces, and keeps an escaped number with a space after it in an item"
+  - file: "construct-singles/collapsible-opener.md"
+    group: construct-singles
+    construct: collapsible-section-opener
+    class: fixable
+    basis: known
+    canary: kx-c27a9f15
+    corpus: false
+    note: "a line opening with >>> is a collapsible section: the line is its title, a paragraph it interrupts gets a blank line, and a >>> line without a title closes it"
+  - file: "construct-singles/collapsible-opener-containers.md"
+    group: construct-singles
+    construct: collapsible-section-opener
+    class: fixable
+    basis: known
+    canary: kx-5e1c3a07
+    corpus: false
+    note: "a >>> section in a list item or a quote closes where its container ends; two signs or spaced signs stay quotes"
+  - file: "links/destination-non-ascii.md"
+    group: links
+    construct: link-destination-non-ascii
+    class: fixable
+    basis: known
+    canary: kx-3b9d0e64
+    corpus: false
+    note: "Linear percent-encodes characters outside ASCII in a link destination as UTF-8, also an autolink's, and writes the host in Punycode"
+  - file: "construct-singles/backslash-block-end.md"
+    group: construct-singles
+    construct: backslash-block-end
+    class: fixable
+    basis: known
+    canary: kx-81f4c2d9
+    corpus: false
+    note: "a backslash that ends a paragraph, heading, item or quote breaks no line; Linear doubles it"
+  - file: "lint-errors/section-opener.md"
+    group: lint-errors
+    construct: section-opener-with-section-lines
+    class: lint-error
+    rule: section-opener
+    line: 7
+    basis: known
+    canary: kx-6d2e8b41
+    corpus: false
+    note: "a >>> line in a file that also has +++ section lines: Linear pairs them, so fix leaves the file"
+  - file: "construct-singles/literal-tilde.md"
+    group: construct-singles
+    construct: literal-tilde
+    class: fixable
+    basis: known
+    canary: kx-d5b95d6b
+    corpus: false
+    note: "Linear escapes every literal ~ in text, in headings, table cells and items too; strikethrough and code keep theirs"
+  - file: "construct-singles/literal-underscore.md"
+    group: construct-singles
+    construct: literal-underscore
+    class: fixable
+    basis: known
+    canary: kx-505d8b21
+    corpus: false
+    note: "Linear escapes a literal _ except in a run between two ASCII letters or digits; next to a letter outside ASCII it escapes it too"
+  - file: "construct-singles/continuation-hash.md"
+    group: construct-singles
+    construct: continuation-hash
+    class: fixable
+    basis: known
+    canary: kx-20544ac6
+    corpus: false
+    note: "Linear escapes a # that starts a continuation line four or more columns past its container"
+  - file: "construct-singles/literal-underscore-runs.md"
+    group: construct-singles
+    construct: literal-underscore
+    class: fixable
+    basis: known
+    canary: kx-f3a19cd2
+    corpus: false
+    note: "Linear decides each _ by its own neighbours (ASCII letters, digits or _), in link labels too, and drops an escape it does not need"
+  - file: "construct-singles/hash-before-nbsp.md"
+    group: construct-singles
+    construct: continuation-hash
+    class: fixable
+    basis: known
+    canary: kx-bb890607
+    corpus: false
+    note: "Linear escapes a # at a continuation line's start before a no-break space, with or without indentation"
+  - file: "construct-singles/section-marker-bare.md"
+    group: construct-singles
+    construct: collapsible-section-opener
+    class: fixable
+    basis: known
+    canary: kx-1938df17
+    corpus: false
+    note: "A bare opener gains one trailing space."
+  - file: "construct-singles/section-marker-nested.md"
+    group: construct-singles
+    construct: collapsible-section-opener
+    class: fixable
+    basis: known
+    canary: kx-29ab3e29
+    corpus: false
+    note: "Bare closing markers close the innermost section."
+  - file: "construct-singles/section-marker-unpaired.md"
+    group: construct-singles
+    construct: collapsible-section-opener
+    class: fixable
+    basis: known
+    canary: kx-4f13c557
+    corpus: false
+    note: "A section with a body closes at the end of its container."
+  - file: "construct-singles/section-marker-containers.md"
+    group: construct-singles
+    construct: collapsible-section-opener
+    class: fixable
+    basis: known
+    canary: kx-681bd3ea
+    corpus: false
+    note: "Section pairing is local to each list item or quote."
+  - file: "construct-singles/section-marker-standalone.md"
+    group: construct-singles
+    construct: collapsible-section-opener
+    class: fixable
+    basis: known
+    canary: kx-c89e31cb
+    corpus: false
+    note: "A trailing bare marker remains literal."
+  - file: "construct-singles/nbsp-forms.md"
+    group: construct-singles
+    construct: nbsp
+    class: fixable
+    basis: known
+    canary: kx-3e71d00f
+    corpus: false
+    note: "Linear keeps a trailing NBSP after a heading's or a body cell's text, drops one around a header cell's, and stores &nbsp;, &#160; and &#xA0; as the character outside code"
+  - file: "construct-singles/code-span-lines.md"
+    group: construct-singles
+    construct: code-span-lines
+    class: fixable
+    basis: known
+    canary: kx-58a3f733
+    corpus: false
+    note: "Linear writes a code span that runs over lines on one line: each line ending becomes a space, container prefixes go, the line's own indentation stays"
+  - file: "construct-singles/heading-empty-levels.md"
+    group: construct-singles
+    construct: heading-empty
+    class: fixable
+    basis: known
+    canary: kx-f4f96677
+    corpus: false
+    note: "Linear writes an empty heading of every level with a space after its hashes, also with a closing sequence or in a quote"
+  - file: "construct-singles/quote-empty-nested.md"
+    group: construct-singles
+    construct: quote-empty
+    class: fixable
+    basis: known
+    canary: kx-54dcf365
+    corpus: false
+    note: "Linear writes an empty quote, nested or not, with a space after its last sign; a blank line between a quote's blocks stays a bare sign"
+  - file: "construct-singles/nbsp-space-number.md"
+    group: construct-singles
+    construct: nbsp-space-number
+    class: fixable
+    basis: known
+    canary: kx-c35a525c
+    corpus: false
+    note: "past a no-break space at a line's start, also with spaces, Linear escapes the dot of a number before a space; N) stays"
+  - file: "construct-singles/nbsp-space-marker.md"
+    group: construct-singles
+    construct: nbsp-space-number
+    class: fixable
+    basis: known
+    canary: kx-845a4479
+    corpus: false
+    note: "past a no-break space Linear escapes a heading-like hash run and a number's dot; -, +, > and a number without a space or text stay"
+  - file: "construct-singles/nbsp-space-containers.md"
+    group: construct-singles
+    construct: nbsp-space-number
+    class: fixable
+    basis: known
+    canary: kx-f3096a01
+    corpus: false
+    note: "the no-break space escapes in a list item, a quote and a body cell; a heading's text keeps its number plain"
+  - file: "construct-singles/setext-heading-lines.md"
+    group: construct-singles
+    construct: setext-heading-lines
+    class: lint-error
+    rule: setext-heading-lines
+    line: 3
+    basis: known
+    canary: kx-8e951f4f
+    corpus: false
+    note: "Linear keeps a setext heading's first line as the heading and the other lines as a paragraph"
+  - file: "construct-singles/item-section-run.md"
+    group: construct-singles
+    construct: item-section-run
+    class: fixable
+    basis: known
+    canary: kx-84ea78d6
+    corpus: false
+    note: "+++ starting a list item: text when it is the item's only line, a section when a closing marker follows in the item"
+  - file: "construct-singles/item-section-run-more.md"
+    group: construct-singles
+    construct: item-section-run
+    class: fixable
+    basis: known
+    canary: kx-059880be
+    corpus: false
+    note: "a section starting a list item, with blank lines or empty; Linear writes an empty first line and the section below it"
+  - file: "construct-singles/item-section-run-outside.md"
+    group: construct-singles
+    construct: item-section-run
+    class: fixable
+    basis: known
+    canary: kx-28e5300f
+    corpus: false
+    note: "a +++ item followed by a +++ line after the list stays text; a titled marker with an indented line below it opens a section"
+  - file: "construct-singles/item-section-run-tight.md"
+    group: construct-singles
+    construct: item-section-run
+    class: fixable
+    basis: known
+    canary: kx-65eb6a08
+    corpus: false
+    note: "a marker starting a list item or quote with the next line right below it opens a section, titled or not"
+  - file: "tables/table-one-column.md"
+    group: tables
+    construct: table-one-column
+    class: fixable
+    basis: known
+    canary: kx-c6edf344
+    corpus: false
+    note: "one-column tables with body rows and header only stay tables; a pipe line with no delimiter row stays text"
+  - file: "tables/table-one-column-forms.md"
+    group: tables
+    construct: table-one-column
+    class: fixable
+    basis: known
+    canary: kx-9208ce58
+    corpus: false
+    note: "one-column tables with outer pipes left out on one side, without spaces, in a list item and a quote"
+  - file: "tables/table-header-no-pipe.md"
+    group: tables
+    construct: table-header-no-pipe
+    class: lint-error
+    rule: table-header-pipe
+    line: 3
+    basis: known
+    canary: kx-2e5e0e34
+    corpus: false
+    note: "Linear keeps a one-column table whose header line has no pipe as text"
+  - file: "tables/table-cell-markers.md"
+    group: tables
+    construct: table-cell-markers
+    class: lint-error
+    rule: table-list-cell
+    line: 5
+    basis: known
+    canary: kx-9b15a1b9
+    corpus: false
+    note: "Linear holds a body cell starting with a list marker as a list and writes it with * or N.; a number and a dot gets a space"
+  - file: "tables/table-cell-escaped-markers.md"
+    group: tables
+    construct: table-cell-escaped-markers
+    class: fixable
+    basis: known
+    canary: kx-38d519db
+    corpus: false
+    note: "escaped list markers at a body cell's start stay text; a cell of only a number and a dot is written with a space after it"
+  - file: "list-items/list-kinds-in-item.md"
+    group: list-items
+    construct: list-kinds
+    class: fixable
+    basis: known
+    canary: kx-b16712d8
+    corpus: false
+    note: "In a list item, Linear writes a list of another kind (bullet, numbered, task) on the line after the list before it"
+  - file: "list-items/list-split-after-empty-item.md"
+    group: list-items
+    construct: empty-list-item
+    class: fixable
+    basis: known
+    canary: kx-ae019ab3
+    corpus: false
+    note: "Two or more blank lines after an empty item end the list in Linear, which writes two blank lines there and starts the list after them at its first item's number"
+  - file: "list-items/list-first-in-item.md"
+    group: list-items
+    construct: list-first-in-item
+    class: fixable
+    basis: known
+    canary: kx-51459ba8
+    corpus: false
+    note: "Linear writes a list that starts an item below an empty marker line, nested in the item"
+  - file: "list-items/list-after-item-text.md"
+    group: list-items
+    construct: list-after-item-text
+    class: lint-error
+    rule: list-after-item-text
+    line: 3
+    basis: known
+    canary: kx-3eca5c15
+    corpus: false
+    note: "In an item, Linear writes a list whose first marker cannot interrupt a paragraph right below the text or list before it"
+  - file: "construct-singles/space-reference.md"
+    group: construct-singles
+    construct: space-reference
+    class: fixable
+    basis: known
+    canary: kx-41710cf6
+    corpus: false
+    note: "Linear stores &#32; and &#x20; as a space outside code, moves one at a mark's inner edge out of the mark and keeps one in a link label"
+  - file: "construct-singles/space-reference-edges.md"
+    group: construct-singles
+    construct: space-reference
+    class: fixable
+    basis: known
+    git_form: captured
+    canary: kx-9c2d5e17
+    corpus: false
+    note: "Linear keeps a space reference at a block's start or end as a space, which its next write drops; fix writes the form without it"
+  - file: "construct-singles/lone-backtick.md"
+    group: construct-singles
+    construct: lone-backtick
+    class: fixable
+    basis: known
+    canary: kx-f3eef474
+    corpus: false
+    note: "Linear escapes a backtick that opens no code span, in every block"
+  - file: "links/adjacent-links.md"
+    group: links
+    construct: adjacent-links
+    class: fixable
+    basis: known
+    canary: kx-4eec1c8c
+    corpus: false
+    note: "Linear joins adjacent links to the same destination into one, with the marks around each part inside it; a space, another destination or a line ending keeps them apart"
+  - file: "construct-singles/bold-punctuation-boundaries.md"
+    group: construct-singles
+    construct: adjacent-bold-boundaries
+    class: fixable
+    basis: known
+    canary: kx-09b751c4
+    corpus: false
+    note: "Closing punctuation moves outside a split bold run"
+  - file: "construct-singles/bold-italic-boundaries.md"
+    group: construct-singles
+    construct: adjacent-bold-boundaries
+    class: fixable
+    basis: known
+    canary: kx-09b751c5
+    corpus: false
+    note: "Outer stars around whitespace-separated italic runs disappear"
+  - file: "links/url-punctuation-boundaries.md"
+    group: links
+    construct: bare-url-endings
+    class: fixable
+    basis: known
+    canary: kx-09b751c3
+    corpus: false
+    note: "Trailing punctuation stays outside the link, including the last comma or semicolon in a run"
+  - file: "links/url-star-boundaries.md"
+    group: links
+    construct: bare-url-endings
+    class: fixable
+    basis: known
+    canary: kx-09b751c2
+    corpus: false
+    note: "Two or more periods before stars end the bare link"
+  - file: "links/url-bare-controls.md"
+    group: links
+    construct: bare-url-endings
+    class: fixable
+    basis: known
+    canary: kx-09b751d5
+    corpus: false
+    note: "A scheme-less link follows the same path punctuation rules"
+  - file: "construct-singles/tab-reference-middle.md"
+    group: construct-singles
+    construct: tab-reference
+    class: fixable
+    basis: known
+    canary: kx-09b751d0
+    corpus: false
+    note: "Linear decodes tabs inside text and moves them outside inline marks"
+  - file: "lint-errors/tab-reference-blank.md"
+    group: lint-errors
+    construct: tab-reference-layout
+    class: lint-error
+    basis: known
+    rule: tab-reference-layout
+    line: 1
+    canary: kx-09b751c0
+    corpus: false
+    note: "A single tab is a paragraph in Linear and a blank line in Markdown"
+  - file: "lint-errors/tab-reference-list.md"
+    group: lint-errors
+    construct: tab-reference-layout
+    class: lint-error
+    basis: known
+    rule: tab-reference-layout
+    line: 1
+    canary: kx-09b751d1
+    corpus: false
+    note: "Markdown reads the exported tabs as list or quote indentation and discards trailing tabs"
+  - file: "lint-errors/tab-reference-trailing.md"
+    group: lint-errors
+    construct: tab-reference-layout
+    class: lint-error
+    basis: known
+    rule: tab-reference-layout
+    line: 1
+    canary: kx-09b751d2
+    corpus: false
+    note: "Markdown drops the tabs Linear keeps at the end of a paragraph"
+  - file: "lint-errors/tab-reference-leading-mark.md"
+    group: lint-errors
+    construct: tab-reference-layout
+    class: lint-error
+    basis: known
+    rule: tab-reference-layout
+    line: 1
+    canary: kx-09b751d3
+    corpus: false
+    note: "Markdown reads the exported leading tabs as code indentation"

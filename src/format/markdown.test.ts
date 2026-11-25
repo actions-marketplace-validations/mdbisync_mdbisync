@@ -1,12 +1,15 @@
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { readFileSync } from 'node:fs';
+import { readdirSync, readFileSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import { dirname, join } from 'node:path';
 import { describe, it } from 'node:test';
-import type { Nodes, Root } from 'mdast';
+import type { Nodes, Paragraph, Root } from 'mdast';
+import { fromMarkdown } from 'mdast-util-from-markdown';
+import { gfmFromMarkdown } from 'mdast-util-gfm';
+import { gfm } from 'micromark-extension-gfm';
 import { EditMap } from 'micromark-util-edit-map';
-import { MarkdownLimitError, MARKDOWN_MAX_DEPTH, MARKDOWN_MAX_NODES, joinFile, linkDestination, nestedFileBlocksOnItemLine, parse, sameMarkdown, splitFile, visit } from './markdown.ts';
+import { MarkdownLimitError, MARKDOWN_MAX_DEPTH, MARKDOWN_MAX_NODES, bracketedLabel, codeSpans, decodedDestinationPath, joinFile, linearMarkersAsText, linkDestination, nestedFileBlocksOnItemLine, parse, sameAsLinear, sameMarkdown, splitFile, visit } from './markdown.ts';
 import { lintText } from './lint.ts';
 import { fixText } from './fix.ts';
 
@@ -158,6 +161,86 @@ describe('the parser edit map', () => {
   });
 });
 
+describe('the bare-URL search inside text', () => {
+  const withoutPositions = (tree: Root): unknown => JSON.parse(JSON.stringify(tree, (key, value: unknown) => (key === 'position' ? undefined : value)));
+  const upstream = (text: string): Root => fromMarkdown(text, { extensions: [gfm()], mdastExtensions: [gfmFromMarkdown()] });
+  const unplaced = (tree: Root): Nodes[] => {
+    const found: Nodes[] = [];
+    visit(tree, (node) => {
+      if (node.position === undefined) found.push(node);
+    });
+    return found;
+  };
+
+  it('is the one tree transform of GFM, the one parse runs per text node', () => {
+    const transforms = gfmFromMarkdown().flatMap((extension) => extension.transforms ?? []);
+    assert.equal(transforms.length, 1);
+    const tree = upstream('"www.example.com"');
+    assert.equal((tree.children[0] as Paragraph).children[1]?.type, 'link');
+  });
+
+  it('gives the tree GFM gives, with a source position on every node it can place', () => {
+    const texts = [
+      'See "www.example.com" now.',
+      'Host:www.example.com and [https://example.com] and "team@example.com".',
+      '> Quote "www.example.com/a_b".\n> *Next* "https://example.com/x." line',
+      '- a "www.example.com", "www.example.com" www.example.com\n  b (www.example.com).',
+      '| a | b |\n| - | - |\n| "www.example.com" | x |',
+      '# Notes on "www.example.com"\n\n**"www.example.com"** ~~"www.example.com"~~ *"www.example.com/*x*"*',
+      'Skip xwww.example.com, then "www.example.com". Mail "a&#46;b@example.com".',
+      '[a "www.example.com"](https://example.com) [b][r]\n\n[r]: https://example.com',
+      '\uFEFFSee "www.example.com" now.\n\n\uFEFF"www.example.com"',
+    ];
+    const fixtures = new URL('../../test/fixtures/', import.meta.url);
+    for (const file of readdirSync(fixtures, { recursive: true, encoding: 'utf8' })) {
+      if (file.endsWith('.md')) texts.push(readFileSync(new URL(file, fixtures), 'utf8'));
+    }
+    for (const text of texts) {
+      const tree = parse(text);
+      assert.deepEqual(withoutPositions(tree), withoutPositions(upstream(text)), JSON.stringify(text.slice(0, 80)));
+      assert.deepEqual(unplaced(tree), [], JSON.stringify(text.slice(0, 80)));
+    }
+  });
+
+  it('places each link at the text it comes from', () => {
+    const text = 'Skip xwww.example.com, then\n> "www.example.com" and (www.example.com/a).';
+    const links: string[] = [];
+    visit(parse(text), (node) => {
+      if (node.type === 'link') links.push(`${text.slice(node.position!.start.offset, node.position!.end.offset)}@${node.position!.start.line}:${node.position!.start.column}`);
+    });
+    assert.deepEqual(links, ['www.example.com@2:4', 'www.example.com/a@2:26']);
+    // A line ends at CR LF, CR or LF, as the parser counts lines.
+    const lines = (body: string): number[] => {
+      const found: number[] = [];
+      visit(parse(body), (node) => {
+        if (node.type === 'link') found.push(node.position!.start.line);
+      });
+      return found;
+    };
+    assert.deepEqual(lines('First\rThen <https://example.com> and "www.example.com"'), [2, 2]);
+    assert.deepEqual(lines('First\r\nThen\r\n"www.example.com"'), [3]);
+    // The parser counts offsets after a leading BOM.
+    const [link] = (parse('\uFEFF"www.example.com"').children[0] as Paragraph).children.filter((node) => node.type === 'link');
+    assert.deepEqual([link?.position?.start.offset, link?.position?.start.column], [1, 2]);
+  });
+
+  it('leaves a link without a position when the source spells its text differently', () => {
+    for (const text of ['See "www.example.com/a\\_b" now.', 'See "www.example.com/a&amp;b" now.', 'Mail "\\+first@example.com".', 'See "www.example.com/&amp;amp".']) {
+      const tree = parse(text);
+      assert.deepEqual(withoutPositions(tree), withoutPositions(upstream(text)));
+      assert.deepEqual(unplaced(tree).map((node) => node.type), ['text', 'link', 'text', 'text'], text);
+    }
+  });
+
+  it('places many links in one text in time that grows with the text', () => {
+    const text = '"www.example.com" '.repeat(13_000);
+    const started = performance.now();
+    const tree = parse(text);
+    assert.ok(performance.now() - started < 10_000, `took ${Math.round(performance.now() - started)} ms`);
+    assert.deepEqual(unplaced(tree), []);
+  });
+});
+
 describe('sameMarkdown', () => {
   it("takes Linear's spellings of the same document as the same", () => {
     assert.ok(sameMarkdown('# Notes\n\nText.', '# Notes\n\nText.\n'));
@@ -296,6 +379,107 @@ describe('sameMarkdown', () => {
   });
 });
 
+describe('linearMarkersAsText', () => {
+  it('puts back the escape Linear drops from text that starts like a `)` number or a `+` bullet', () => {
+    const cases: Array<[string, string]> = [
+      ['1. 4) pear', '1. 4\\) pear'],
+      ['1. +', '1. \\+'],
+      ['* 1) fig\n* +', '* 1\\) fig\n* \\+'],
+      ['4) pear\n\n+\n\n1) fig', '4\\) pear\n\n\\+\n\n1\\) fig'],
+      ['> 4) pear\n\n> +', '> 4\\) pear\n\n> \\+'],
+      ['Note\n\n1. 4) pear\n2. Next\n\n   4) pear', 'Note\n\n1. 4\\) pear\n2. Next\n\n   4\\) pear'],
+      // Only the outer marker: the text after it is no list.
+      ['1. 4) + pear', '1. 4\\) + pear'],
+    ];
+    for (const [linear, file] of cases) {
+      assert.equal(linearMarkersAsText(linear), file, JSON.stringify(linear));
+      assert.ok(sameAsLinear(linear, file), JSON.stringify(linear));
+      assert.ok(!sameMarkdown(linear, file), `read alone, ${JSON.stringify(linear)} is another document`);
+      assert.equal(fixText(file), file, `fix keeps ${JSON.stringify(file)}`);
+    }
+  });
+
+  it('keeps block starts that Linear exports as paragraph text', () => {
+    const cases: Array<[string, string]> = [
+      ['<div> Shelf', '\\<div> Shelf'],
+      ['<<<<<<< draft', '\\<<<<<<< draft'],
+      ['Notes\n<<<<<<< draft', 'Notes\n\\<<<<<<< draft'],
+      ['$$\na + b\n$$', '\\$$\na + b\n$$'],
+      ['+++ Supplies', '\\+++ Supplies'],
+      ['+++\tSupplies', '\\+++\tSupplies'],
+      ['+++ Supplies\n\n```\n+++\n```', '\\+++ Supplies\n\n```\n+++\n```'],
+      ['+++ Supplies\nPaper\n+++', '\\+++ Supplies\nPaper\n\\+++'],
+      ['| Color | Size |\n| -- | -- |\n| Blue | Large |', '| Color | Size |\n\\| -- | -- |\n| Blue | Large |'],
+      ['> | Color | Size |\n> | --- | --- |\n> | Blue | Large |', '> | Color | Size |\n> \\| --- | --- |\n> | Blue | Large |'],
+    ];
+    for (const [linear, file] of cases) {
+      assert.equal(linearMarkersAsText(linear), file);
+      assert.ok(sameAsLinear(linear, file), JSON.stringify(linear));
+      assert.equal(fixText(file), file);
+    }
+    assert.ok(sameAsLinear('+++ Supplies\nPaper\n\n+++', '\\+++ Supplies\nPaper\n+++'));
+    assert.ok(sameAsLinear('$$\na + b\n$$', '\\$$\na + b\n\\$$'));
+    assert.ok(sameAsLinear('Intro\n\n<div> Shelf', 'Intro\r\r\\<div> Shelf'));
+    assert.equal(linearMarkersAsText('Intro\r\r<div> Shelf'), 'Intro\r\r\\<div> Shelf');
+  });
+
+  it('uses the accepted spelling for an ambiguous export', () => {
+    const rows = '| Color | Size |\n| -- | -- |\n| Blue | Large |';
+    const section = '+++ Supplies\n\nPaper\n\n+++';
+    const linear = `${rows}\n\n${section}`;
+    const literal = linear.replace('\n| --', '\n\\| --').replaceAll('+++', '\\+++');
+    assert.equal(linearMarkersAsText(linear), linear);
+    assert.equal(linearMarkersAsText(linear, literal), literal);
+    assert.ok(sameAsLinear(linear, literal));
+    assert.ok(!sameAsLinear(linear.replace('Large', 'Small'), literal));
+    assert.equal(linearMarkersAsText(section, '\\+++ Supplies\nPaper\n\\+++'), section);
+    assert.ok(sameAsLinear('<p> Shelf\n<p> Tray', '\\<p> Shelf\n\\<p> Tray'));
+    assert.ok(sameAsLinear('* <p> Shelf', '* \\<p> Shelf'));
+  });
+
+  it('keeps genuine blocks alongside examples with the same opening lines', () => {
+    const literal = [
+      '\\<div> Shelf\nSome notes',
+      '| Color | Size |\n\\| -- | -- |\n| Blue | Large |\n| Red | Large |',
+      '\\+++ Supplies\n\nPaper\n\n\\+++',
+    ].join('\n\n');
+    const blocks = [
+      '<div> Shelf\n</div>',
+      '| Color | Size |\n| -- | -- |\n| Blue | Large |\n| Green | Small |',
+      '+++ Purchase\n\nLabels\n\n+++',
+    ].join('\n\n');
+    const linear = `${literal.replaceAll('\\', '')}\n\n${blocks}`;
+    const file = `${literal}\n\n${blocks}`;
+    assert.equal(linearMarkersAsText(linear, file), file);
+    assert.ok(sameAsLinear(linear, file));
+  });
+
+  it('keeps Linear\'s own lists, code and other text as they are', () => {
+    for (const text of [
+      '* pear\n* fig',
+      '- [ ] pear\n- [X] fig',
+      '1. pear\n2. fig',
+      '1. \n   3. plum',
+      '- [ ] 4) pear',
+      '+++ Details\n\nHidden.\n\n+++',
+      '```\n+ pear\n4) fig\n```',
+      '    + pear',
+      'Pears + figs, 4) and more.',
+      '1. 4\\) pear\n2. \\+',
+      '+pear and 4)pear',
+    ]) assert.equal(linearMarkersAsText(text), text, JSON.stringify(text));
+  });
+
+  it('takes a text as the same as itself, and tells a changed document apart', () => {
+    // The initial import compares Linear's content with itself.
+    assert.ok(sameAsLinear('1. 4) pear\n2. +', '1. 4) pear\n2. +'));
+    assert.ok(!sameAsLinear('1. 4) pear', '1. 4\\) plum'));
+    assert.ok(!sameAsLinear('4) pear', '4. pear'));
+    assert.ok(!sameAsLinear('+ pear', '* pear'));
+    assert.ok(!sameAsLinear('1. +', '1. \\-'));
+  });
+});
+
 describe('joinFile', () => {
   // Linear spells every thematic break `---`, so a body can start with a block that reads as front matter.
   const blockFirst = '---\nlinear-team: Other\n---\n\nText.\n';
@@ -342,38 +526,99 @@ describe('joinFile', () => {
   });
 });
 
+describe('codeSpans and bracketedLabel', () => {
+  const spans = (text: string): string[] => codeSpans(text, 0, text.length).map(([from, to]) => text.slice(from, to));
+
+  it('finds a run of backticks up to the next run of the same length', () => {
+    assert.deepEqual(spans('a `b` c ``d`e`` f'), ['`b`', '``d`e``']);
+    assert.deepEqual(spans('a ``b` c` d'), ['` c`']);
+    assert.deepEqual(spans('a \\`b` c`'), ['` c`']);
+    assert.deepEqual(spans('`a\\` b'), ['`a\\`']);
+    assert.deepEqual(spans('``a ` b'), []);
+  });
+
+  it('leaves the backticks of an autolink or inline HTML that starts first', () => {
+    assert.deepEqual(spans('<https://a/`> b `c`'), ['`c`']);
+    assert.deepEqual(spans('<a@b.c> `d`'), ['`d`']);
+    assert.deepEqual(spans('<b title="`"> `c`'), ['`c`']);
+    assert.deepEqual(spans('</b> <!-- ` --> <? ` ?> <!X `> <![CDATA[ ` ]]> `c`'), ['`c`']);
+    assert.deepEqual(spans('<!--> `c` <!---> `d`'), ['`c`', '`d`']);
+    // A code span that starts first holds the `<`.
+    assert.deepEqual(spans('`a <https://b/` c`>'), ['`a <https://b/`']);
+    // A `<` that opens nothing, or an HTML comment that does not close in the range, is text.
+    assert.deepEqual(spans('a < `b` <!-- `c`'), ['`b`', '`c`']);
+  });
+
+  it('reads many unclosed HTML openings in about the time of their length', { timeout: 60_000 }, () => {
+    const text = '<!-- <? <!X <![CDATA[ <a b="'.repeat(20_000) + '`c`';
+    const started = performance.now();
+    assert.deepEqual(codeSpans(text, 0, text.length), [[text.length - 3, text.length]]);
+    assert.ok(performance.now() - started < 3_000, `${performance.now() - started} ms`);
+  });
+
+  it('does not count a bracket in a code span of a label', () => {
+    assert.equal(bracketedLabel('![a `]` b](x.png)', 1, 17), 'a `]` b');
+    assert.equal(bracketedLabel('[a `[` b]', 0, 9), 'a `[` b');
+    assert.equal(bracketedLabel('[a ` b] c`', 0, 7), 'a ` b');
+    // A backtick in an autolink and one in the destination open no code span.
+    assert.equal(bracketedLabel('![a <urn:a`>](x`.png)', 1, 21), 'a <urn:a`>');
+    assert.equal(bracketedLabel('![a <span title="`">](x.png "t`")', 1, 33), 'a <span title="`">');
+    assert.equal(bracketedLabel('![<https://a/`>](x`](y).png)', 1, 28), '<https://a/`>');
+  });
+
+  // Each label is searched up to its node's end, not to the next backtick
+  // of the document: a scan to the end per label made many labels quadratic.
+  it('reads many labels before a long text in about the time of their length', { timeout: 60_000 }, () => {
+    const text = '![a `b`](x.png)' + 'c'.repeat(4_000_000) + '`';
+    const started = performance.now();
+    for (let count = 0; count < 200_000; count++) assert.equal(bracketedLabel(text, 1, 15), 'a `b`');
+    assert.ok(performance.now() - started < 3_000, `${performance.now() - started} ms`);
+  });
+
+  it('scans many unclosed runs of different lengths in linear time', { timeout: 60_000 }, () => {
+    const text = Array.from({ length: 2_000 }, (_, index) => '`'.repeat(index + 1)).join('a');
+    const started = performance.now();
+    assert.deepEqual(codeSpans(text, 0, text.length), []);
+    assert.ok(performance.now() - started < 5_000);
+  });
+});
+
 describe('linkDestination', () => {
-  // The destination as it was written while a regular expression counted its
-  // trailing backslashes; a short destination keeps that output.
-  const previous = (url: string): string => {
-    const inner = url
-      .replace(/[<>\r\n]/g, (char) => `%${char.charCodeAt(0).toString(16).toUpperCase().padStart(2, '0')}`)
-      .replace(/ /g, '%20')
-      .replace(/\\(?=[!-/:-@[-`{-~])/g, '\\\\')
-      .replace(/&(?=#[0-9]{1,7};|#[xX][0-9a-fA-F]{1,6};|[A-Za-z][A-Za-z0-9]{1,31};)/g, '&amp;');
-    return `<${inner}${/\\*$/.exec(inner)![0].length % 2 === 1 ? '\\' : ''}>`;
-  };
-
-  it('writes every short destination over backslashes, letters and parentheses as before', () => {
+  it('percent-encodes a backslash, |, ^, { and } as Linear writes them, and keeps where the link goes', () => {
+    assert.equal(linkDestination('a\\'), '<a%5C>');
+    assert.equal(linkDestination('a\\x'), '<a%5Cx>');
+    assert.equal(linkDestination('a|b^c{d}'), '<a%7Cb%5Ec%7Bd%7D>');
+    assert.equal(linkDestination('a b<c>'), '<a%20b%3Cc%3E>');
+    // A `%` that starts no escape is written `%25`, so a file name holding one still decodes next to an encoded character.
+    assert.equal(linkDestination('100%|.pdf'), '<100%25%7C.pdf>');
+    assert.equal(decodedDestinationPath('100%25%7C.pdf'), '100%|.pdf');
+    // A relative path that does not decode names its file as written: every `%` in it is literal.
+    assert.equal(linkDestination('a%20b%zz.pdf'), '<a%2520b%25zz.pdf>');
+    assert.equal(decodedDestinationPath('a%2520b%25zz.pdf'), 'a%20b%zz.pdf');
+    assert.equal(linkDestination('a%20b|c.pdf?q=1%zz'), '<a%20b%7Cc.pdf?q=1%25zz>');
+    assert.equal(decodedDestinationPath('a%20b%7Cc.pdf'), 'a b|c.pdf');
+    // An absolute URL keeps its escapes; only a `%` that starts none becomes `%25`, as renderers write it.
+    assert.equal(linkDestination('https://example.com/a%20b%zz'), '<https://example.com/a%20b%25zz>');
+    // Every relative destination still resolves to the file it named before.
+    for (const url of ['a%20b%zz.pdf', '100%|.pdf', 'a%20b.pdf', 'a|b.pdf', '%FF.pdf', 'x%2Fy%.md', 'n\\o{t}e.md?x=%zz']) {
+      const written = linkDestination(url).slice(1, -1).replace(/\\(.)/g, '$1');
+      assert.equal(decodedDestinationPath(written), decodedDestinationPath(url), url);
+    }
+    // Every short destination over these characters reads back as the same link.
     let urls = [''];
-    for (let length = 1; length <= 8; length++) {
-      urls = urls.flatMap((url) => ['\\', 'x', '('].map((char) => url + char));
-      for (const url of urls) assert.equal(linkDestination(url), previous(url), JSON.stringify(url));
+    for (let length = 1; length <= 6; length++) {
+      urls = urls.flatMap((url) => ['\\', 'x', '(', '|', '{'].map((char) => url + char));
+      for (const url of urls) {
+        assert.ok(sameMarkdown(`[a](${linkDestination(url)})`, `[a](<${url.replace(/\\/g, '\\\\')}>)`), JSON.stringify(url));
+      }
     }
   });
 
-  it('doubles the last backslash of an odd run that ends the destination, so it cannot escape the bracket', () => {
-    assert.equal(linkDestination('a\\'), '<a\\\\>');
-    assert.equal(linkDestination('\\\\\\'), '<\\\\\\\\\\\\>');
-    assert.equal(linkDestination('a\\x'), '<a\\x>');
-    for (const url of ['a\\', 'a\\\\\\', '\\(\\', 'x\\\\x\\']) {
-      assert.ok(sameMarkdown(`[a](${linkDestination(url)})`, `[a](<${url.replace(/\\/g, '\\\\')}>)`), JSON.stringify(url));
-    }
-  });
-
-  // The run of backslashes that ends a destination was counted by a regular
-  // expression that rescanned the run from each of its positions when another
-  // character followed it: a run of the content limit took minutes. fix
+  // The run of backslashes that ends a destination was once counted by a
+  // regular expression that rescanned the run from each of its positions
+  // when another character followed it: a run near the content limit took
+  // minutes. The run is half the limit, since each backslash it stands for
+  // is written as `%5C`, three characters. fix
   // writes every link destination; lint writes one only for a reference link,
   // to size its expansion. A child process runs lint and fix on an inline and
   // a reference link holding such a run, so the parent's timeout stops a stall
@@ -385,7 +630,7 @@ describe('linkDestination', () => {
       import { fixText } from ${JSON.stringify(new URL('./fix.ts', import.meta.url).href)};
       import { lintText } from ${JSON.stringify(new URL('./lint.ts', import.meta.url).href)};
       import { parse, sameMarkdown } from ${JSON.stringify(new URL('./markdown.ts', import.meta.url).href)};
-      const run = '\\\\'.repeat(CONTENT_LIMIT - 20);
+      const run = '\\\\'.repeat(Math.floor(CONTENT_LIMIT / 2));
       const cases = { inline: '[a](' + run + 'x)', reference: '[a][r]\\n\\n[r]: ' + run + 'x' };
       const result = {};
       for (const [name, text] of Object.entries(cases)) {
