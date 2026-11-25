@@ -1159,6 +1159,26 @@ export function withoutTrailingNewlines(text: string): string {
   return end === text.length ? text : text.slice(0, end);
 }
 
+/**
+ * The code of a code span's text between its fences on one line, as
+ * Markdown reads it: one space at each end goes when both ends are spaces
+ * and the text is not only spaces.
+ */
+export function codeSpanText(inner: string): string {
+  return inner.length > 2 && inner.startsWith(' ') && inner.endsWith(' ') && /[^ ]/.test(inner) ? inner.slice(1, -1) : inner;
+}
+
+/**
+ * Whether Linear writes this code (as Markdown reads it) in a form that
+ * reads as other code: code without a backtick that starts and ends with a
+ * space around other text loses the padding that keeps those spaces, and
+ * three spaces or more alone read as two fewer.
+ */
+export function linearDropsCodeSpaces(code: string): boolean {
+  if (code.includes('`')) return false;
+  return /^ {3,}$/.test(code) || (code.length > 2 && code.startsWith(' ') && code.endsWith(' '));
+}
+
 /** The tree without source positions, destinations as Markdown renders them (`<a b.png>` is `a%20b.png`). */
 function comparable(body: string, { linearNumberSpacing, linearBoldForms, ignoreBold }: NonNullable<Parameters<typeof sameMarkdown>[2]>): unknown {
   // Keep those escapes apart from the plain characters, so `\$$` and `$$` differ.
