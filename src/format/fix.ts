@@ -13,8 +13,8 @@ import { decodeNamedCharacterReference } from 'decode-named-character-reference'
 import { nameToEmoji } from 'gemoji';
 import { normalizeUri } from 'micromark-util-sanitize-uri';
 import { findMarkerLines } from '../merge/markers.ts';
-import { lintText, paddingOverLimit, referencesOverLimit } from './lint.ts';
-import { FIXED_RULES, IMAGE_PLACE_RULES } from './rules.ts';
+import { lintText, overContentLimit, paddingOverLimit, referencesOverLimit } from './lint.ts';
+import { CONTENT_LIMIT, FIXED_RULES, IMAGE_PLACE_RULES } from './rules.ts';
 import { ALERT, MarkdownLimitError, bracketedLabel, codeSpans, decodedDestinationPath, end, imageDestination, isCallout, isCalloutComment, joinFile, linearMarkersAsText, linkDestination, nestedFileBlocksOnItemLine, parse, quoteLines, sameMarkdown, splitFile, start, visit, withoutTrailingNewlines } from './markdown.ts';
 
 export { imageDestination, linkDestination } from './markdown.ts';
@@ -149,10 +149,154 @@ function fixBody(body: string, options: FixOptions): string {
       // A locally equivalent edit can still affect a surrounding block.
       if (!sameMarkdown(next, withOriginalAsterisks)) next = withOriginalAsterisks;
     }
+    next = linearBoldForms(next, next === current ? tree : undefined);
     if (next === current) return next;
     current = next;
   }
   return current;
+}
+
+/** Re-spell bold across line breaks and around a single link in the written body. */
+function linearBoldForms(body: string, tree?: Root, splitLines = true): string {
+  if (!body.includes('**')) return body;
+  const blocks = new Map<Nodes, { breaks: Edit[]; links: Edit[]; added: number }>();
+  if (tree === undefined) {
+    tree = parse(body, [], true);
+    if (hasUnplacedNode(tree)) return body;
+  }
+  visit(tree, (node, ancestors) => {
+    const block = ancestors[1] ?? node;
+    let edits = blocks.get(block);
+    const group = () => {
+      if (edits === undefined) {
+        edits = { breaks: [], links: [], added: 0 };
+        blocks.set(block, edits);
+      }
+      return edits;
+    };
+    if (node.type === 'strong' || node.type === 'emphasis') {
+      const parent = ancestors.at(-1);
+      if (!((parent?.type === 'strong' || parent?.type === 'emphasis') && parent.children.length === 1)) {
+        const edit = boldLinkEdit(body, node);
+        if (edit !== undefined) group().links.push(edit);
+      }
+    }
+    if (!splitLines || (edits?.added ?? 0) > 2 * CONTENT_LIMIT) return;
+    if (node.type !== 'break' && (node.type !== 'text' || node.position!.start.line === node.position!.end.line)) return;
+    if (!ancestors.some((parent) => parent.type === 'strong')) return;
+    // Code, HTML and image labels have no text-node break to rewrite.
+    // Only explicit links can be closed and opened with the same destination.
+    if (ancestors.some((parent) => parent.type === 'linkReference')) return;
+    const split = group();
+    const opens: string[] = [];
+    const closes: string[] = [];
+    let quotes = 0;
+    for (const parent of ancestors) {
+      if (parent.type === 'blockquote') quotes++;
+      if (parent.type === 'strong' || parent.type === 'emphasis' || parent.type === 'delete') {
+        const width = parent.type === 'strong' ? 2 : 1;
+        const mark = parent.type === 'delete' ? /^~{1,2}/.exec(body.slice(start(parent), start(parent) + 2))![0] : undefined;
+        opens.push(mark ?? body.slice(start(parent), start(parent) + width));
+        closes.push(mark ?? body.slice(end(parent) - width, end(parent)));
+      }
+      if (parent.type === 'link') {
+        opens.push('[');
+        closes.push(body.slice(end(parent.children.at(-1)!), end(parent)));
+      }
+    }
+    const open = opens.join('');
+    const close = closes.reverse().join('');
+    for (let at = body.indexOf('\n', start(node)); at !== -1 && at < end(node); at = body.indexOf('\n', at + 1)) {
+      let left = at;
+      while (/[^\S\r\n]/u.test(body[left - 1] ?? '')) left--;
+      let right = at + 1;
+      // The writer has already supplied explicit quote and item prefixes.
+      for (let index = 0; index < quotes; index++) {
+        while (isSpaceOrTab(body[right]!)) right++;
+        if (body[right] === '>') right++;
+      }
+      while (/[^\S\r\n]/u.test(body[right] ?? '')) right++;
+      if (body[left - 1] === '\n' || body[right] === '\n') continue;
+      // Reopening a link repeats its destination. Bound the rewrite before
+      // assembling the candidate, even if every character uses two code units.
+      split.added += close.length + open.length;
+      if (split.added > 2 * CONTENT_LIMIT) break;
+      split.breaks.push({ from: left, to: left, text: close }, { from: right, to: right, text: open });
+    }
+  });
+  // Split the lines first. A link can then be the only content of one of
+  // the new bold spans, even if it was only part of the original span.
+  const breaks = new Map<Nodes, Edit[]>();
+  const links = new Map<Nodes, Edit[]>();
+  for (const [block, edits] of blocks) {
+    if (edits.breaks.length > 0 && edits.added <= 2 * CONTENT_LIMIT) breaks.set(block, edits.breaks);
+    if (edits.links.length > 0) links.set(block, edits.links);
+  }
+  const split = reSpellBold(body, breaks);
+  return split === undefined ? reSpellBold(body, links) ?? body : linearBoldForms(split, undefined, false);
+}
+
+/** A single link carries its coextensive bold and italic marks in its label. */
+function boldLinkEdit(body: string, outer: PhrasingContent): Edit | undefined {
+  let node = outer;
+  let bold = false;
+  let italic = false;
+  while ((node.type === 'strong' || node.type === 'emphasis') && node.children.length === 1) {
+    bold ||= node.type === 'strong';
+    italic ||= node.type === 'emphasis';
+    node = node.children[0]!;
+  }
+  if (node.type !== 'link' || body[start(node)] !== '[' || node.position!.start.line !== node.position!.end.line) return;
+  if (!bold && !(node.children.length === 1 && node.children[0]?.type === 'strong')) return;
+  const last = node.children.at(-1);
+  if (last === undefined) return;
+  const label = body.slice(start(node) + 1, end(last));
+  if (label === '' || label !== label.trim()) return;
+  const text = node.children.map((child) => child.type === 'strong'
+    ? body.slice(start(child) + 2, end(child) - 2) : body.slice(start(child), end(child))).join('');
+  const mark = italic ? '***' : '**';
+  return { from: start(outer), to: end(outer), text: `[${mark}${text}${mark}${body.slice(end(last), end(node))}` };
+}
+
+function reSpellBold(body: string, groups: ReadonlyMap<Nodes, Edit[]>): string | undefined {
+  if (groups.size === 0) return undefined;
+  const equivalent = (from: number, to: number, edits: Edit[]): string | undefined => {
+    const candidate = rewriteBoldRange(body, from, to, edits);
+    if (candidate === undefined) return;
+    try {
+      if (sameMarkdown(body.slice(from, to), candidate, { linearBoldForms: true })) return candidate;
+    } catch (error) {
+      if (!(error instanceof MarkdownLimitError)) throw error;
+    }
+  };
+  const all = [...groups.values()].flat();
+  const full = equivalent(0, body.length, all);
+  if (full !== undefined || groups.size === 1) return full;
+  // Keep edits in independent blocks even if another block has markup that
+  // cannot be split safely. Check the retained edits in the full document too.
+  const safe: Edit[] = [];
+  for (const [block, edits] of groups) {
+    if (equivalent(start(block), end(block), edits) !== undefined) {
+      for (const edit of edits) safe.push(edit);
+    }
+  }
+  return equivalent(0, body.length, safe);
+}
+
+function rewriteBoldRange(body: string, from: number, to: number, edits: Edit[]): string | undefined {
+  if (edits.length === 0) return undefined;
+  const length = edits.reduce((size, edit) => size + edit.text.length - (edit.to - edit.from), to - from);
+  if (length > 2 * CONTENT_LIMIT) return undefined;
+  const parts: string[] = [];
+  let at = from;
+  for (const edit of edits.sort((a, b) => a.from - b.from)) {
+    if (edit.from < at || edit.to > to) return undefined;
+    parts.push(body.slice(at, edit.from), edit.text);
+    at = edit.to;
+  }
+  parts.push(body.slice(at, to));
+  const candidate = parts.join('');
+  return overContentLimit(candidate) ? undefined : candidate;
 }
 
 type Edit = { from: number; to: number; text: string };
@@ -1231,7 +1375,7 @@ export function fixLinearText(linearText: string, content: string, inRepository:
   const uploaded = (url: string): boolean => !notUploadedUris.has(normalizeUri(url));
   const linear = { linkedFileExists: uploaded };
   const fixed = fixText(text, linear);
-  if (fixed !== text && !sameMarkdown(splitFile(fixed).body, splitFile(text).body, { linearNumberSpacing: true })) return text;
+  if (fixed !== text && !sameMarkdown(splitFile(fixed).body, splitFile(text).body, { linearNumberSpacing: true, linearBoldForms: true })) return text;
   // The hook cannot tell which files were uploaded. It can write a list item
   // holding only a link to a repository file as a file block. Linear stores
   // such a block as a link if it holds no upload for the file. Take the
@@ -1314,7 +1458,14 @@ function startsWithFileBlock(list: List): boolean {
 
 function itemAttachment(item: ListItem): Link | undefined {
   const [first] = item.children;
-  return first?.type === 'paragraph' && item.children.length === 1 ? attachmentLink(first) : undefined;
+  const link = first?.type === 'paragraph' && item.children.length === 1 ? attachmentLink(first) : undefined;
+  if (link?.position!.start.line === item.position!.start.line) {
+    // Linear keeps a bold inline file label as a link on its item's line.
+    let label = link.children.length === 1 ? link.children[0] : undefined;
+    while (label?.type === 'emphasis' && label.children.length === 1) label = label.children[0];
+    if (label?.type === 'strong') return undefined;
+  }
+  return link;
 }
 
 /** A paragraph that holds only a link to a relative file other than Markdown: an attachment. */
