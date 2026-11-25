@@ -128,7 +128,8 @@ Blocks:
   list follows its paragraph on the next line (where Markdown would read
   its first marker as text, see [`list-after-item-text`](#list-after-item-text)). In a list item, a list of
   another kind (bullet, numbered, task) follows the list before it on the
-  next line too, where its first line can start a list there.
+  next line too, where its first line can start a list there, and so does
+  a list after code, a quote, a heading, a rule or a table.
 - Two or more blank lines after an empty item end the list in Linear:
   `fix` keeps two there (`2. `, two blank lines, `3. c`). Elsewhere they
   collapse like other blank lines between items. The list after them
@@ -160,7 +161,10 @@ Blocks:
   right after the checkbox gets a backslash where Linear writes one: before
   a `-` or `>`, a `+` followed by a space, one to six `#` followed by a
   space or nothing, and a number's dot followed by a space or tab (which
-  becomes a space): `- [ ] 2. a` becomes `- [ ] 2\. a`.
+  becomes a space): `- [ ] 2. a` becomes `- [ ] 2\. a`. A checkbox that
+  starts the line below a bare marker, with text after it, makes a task
+  item, as in Linear, also when spaces follow the marker: `-` and
+  `  [ ] Pack` on the next line become `- [ ] Pack`.
 - A list marker at the start of an item's text opens a list nested in the
   item, also where the item's list follows a paragraph: `Note` followed by
   `1. 3. plum` is written `Note`, a blank line, `1. ` and `   3. plum`. A
@@ -190,8 +194,14 @@ Blocks:
   `>>>` line without a title closes every section still open there; with
   none open, it opens one without a title (`+++` and a space). With spaces
   between the signs (`> > >`), or when the first sign continues a quote
-  above, it stays a quote. A file that also has a `+++` line is left to
-  you, since Linear would pair that line with the section.
+  above, it stays a quote. In a file that also has `+++` lines, Linear
+  pairs the two kinds apart: a `+++` line without a title closes the
+  innermost `+++` section, a `>>>` line without a title every `>>>`
+  section, and closing a section closes the sections inside it. `fix`
+  writes them so, with one `+++` line for each section closed. A section
+  line without a title that would open a section inside another one, or a
+  `>>>` line without a title after a `+++` line closed its sections, is
+  left to you (`section-opener`).
 - A run of more than three `+` signs is a section marker too, and `fix`
   writes it with three: `++++ Tip` and a closing `++++` become `+++ Tip`
   and `+++`. A closing marker pairs only with an opener of its own width,
@@ -220,7 +230,8 @@ Blocks:
   stays directly above its callout, with no blank line between them.
 - Tilde fences and indented code become backtick fences. A fence whose info
   string holds a backtick stays a tilde fence, since a backtick fence cannot
-  carry one.
+  carry one. A list right after indented code is a list, as in Linear, also
+  when its first number is not 1 (`    code` and `2. b` below it).
 - A code block outside a quote or list item loses the blank lines before
   its closing fence. Linear returns such a block with one of them fewer
   each time it is written, so only a block without them comes back
@@ -499,10 +510,11 @@ tildes, `~~strikethrough~~`, are fine.
 
 ### `table-escaped-pipe`
 
-An escaped pipe in a plain table cell splits the row. Put the cell text in
-inline code, or rephrase it without the pipe. Linear drops the backslash,
-and the pipe starts a new cell; in inline code (`` `a \| b` ``) it is kept
-as it is.
+A pipe in a plain table cell, escaped or written as a character reference,
+comes back from Linear unescaped, which splits the row. Put the cell text in
+inline code, or rephrase it without the pipe. Linear keeps `\|`, `&#124;`
+and `&#x7C;` in the cell, but writes each back as a bare `|`. In inline code
+(`` `a \| b` ``) the pipe is kept as it is.
 
 ```markdown
 | Expression | Meaning |
@@ -819,9 +831,12 @@ The meeting is on Tuesday.
 ### `section-opener`
 
 A line starting with >>> opens a collapsible section in Linear, which fix
-cannot write here: the file also has lines starting with +++, which Linear
-pairs with it, or the section would end inside code. Write the section with
-+++ lines, or start the line with \>.
+cannot write here: a section line without a title would open a section
+inside another one, or a >>> line without a title follows a +++ line that
+closed its sections, or a ++++ line, code or HTML would take in a closing
+line. Close a >>> section with a >>> line and a +++ section with a +++
+line, or start the line with \>. Linear writes a section without a title
+as `+++ `, which reads as a closing line when a section is open.
 
 Elsewhere `fix` writes a `>>>` line as Linear's section (see
 [What `fix` changes](#what-fix-changes)).
@@ -831,11 +846,11 @@ Elsewhere `fix` writes a `>>>` line as Linear's section (see
 
 Kept from last week.
 
-+++
-
->>> New notes
+>>>
 
 Added today.
+
++++
 ```
 
 ### `url-in-html`
@@ -879,6 +894,19 @@ only `fix`; the sync sends such a file as it is.
 
    2.
       * Call the team
+```
+
+### `list-number-too-long`
+
+An ordered list numbered past 999999999: Linear numbers its items on from
+the first number, and Markdown reads a number of more than nine digits as
+text of the item above it. Start the list at a smaller number. Linear keeps
+the items, so the rule stops only `fix`; the sync sends such a file as it
+is.
+
+```markdown
+999999999. Pear
+999999999. Plum
 ```
 
 ### `block-first-in-list-item`
