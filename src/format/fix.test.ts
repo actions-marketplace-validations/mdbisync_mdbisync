@@ -8,7 +8,8 @@ import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import { describe, it } from 'node:test';
 import { fixLinearText, fixText, relativeFileBlocksAsLinks } from './fix.ts';
-import { linkedFileCheck, lintText } from './lint.ts';
+import { CONTENT_LIMIT } from './rules.ts';
+import { linkedFileCheck, lintInTree, lintText } from './lint.ts';
 import { parse, sameAsLinear, sameMarkdown, splitFile, visit } from './markdown.ts';
 
 const cases: Array<[string, string, string]> = [
@@ -35,7 +36,7 @@ const cases: Array<[string, string, string]> = [
   ['past a no-break space at a line start, a number\'s dot and a heading-like hash get a backslash', '\u00a0 4. Rest\n\n\u00a0\u00a010. Rest\n\n\u00a0 # Rest\n\n\u00a0 ###### Rest\n\n\u00a0 #\n\na\n\u00a0 2. b', '\u00a0 4\\. Rest\n\n\u00a0\u00a010\\. Rest\n\n\u00a0 \\# Rest\n\n\u00a0 \\###### Rest\n\n\u00a0 \\#\n\na\n\u00a0 2\\. b'],
   ['past a no-break space in an item, a quote and a body cell too', '1. \u00a0 4. Rest\n\n> \u00a0 # Rest\n\n| A |\n| -- |\n| \u00a0 4. x |', '1. \u00a0 4\\. Rest\n\n> \u00a0 \\# Rest\n\n| A |\n| -- |\n| \u00a0 4\\. x |\n'],
   ['past a no-break space other markers, a number without a space and seven hashes stay', '\u00a0 - a\n\n\u00a0 + a\n\n\u00a0 > a\n\n\u00a0 4) a\n\n\u00a0 4.\n\n\u00a04.a\n\n\u00a0 ####### a\n\n# \u00a0 4. a', '\u00a0 - a\n\n\u00a0 + a\n\n\u00a0 > a\n\n\u00a0 4) a\n\n\u00a0 4.\n\n\u00a04.a\n\n\u00a0 ####### a\n\n# \u00a0 4. a'],
-  ['a body cell whose leading em space goes keeps the escape Linear writes past it', '| A |\n| -- |\n| \u2003# Notes |\n| \u2003 4. x |', '| A |\n| -- |\n| \\# Notes |\n| 4\\. x |\n'],
+  ['past a leading em space in a body cell, which stays', '| A |\n| -- |\n| \u2003# Notes |\n| \u2003 4. x |', '| A |\n| -- |\n| \u2003\\# Notes |\n| \u2003 4\\. x |\n'],
   ['an escaped hash far from a leading no-break space loses its escape', '\u00a0 # a \\# b \\# c', '\u00a0 \\# a # b # c'],
   ['a number and a dot with only whitespace after it stays plain past a no-break space', '\u00a0 4.  \nnext', '\u00a0 4.  \nnext'],
   ['an escape past a no-break space stays', '\u00a0 \\# a\n\n\u00a0 4\\. a\n\n| A |\n| -- |\n| \u00a0 \\# b |', '\u00a0 \\# a\n\n\u00a0 4\\. a\n\n| A |\n| -- |\n| \u00a0 \\# b |\n'],
@@ -182,14 +183,23 @@ describe('NBSP as Linear stores it', () => {
     assert.ok(sameMarkdown('20.&nbsp;Jars', '20\\. Jars', { linearNumberSpacing: true }));
   });
 
-  it('keeps a reference whose character would change what a delimiter run does', () => {
-    // As the character, the NBSP would keep the run from opening bold.
-    for (const text of ['**&nbsp;a**', '**&nbsp;a** and b&nbsp;c']) {
-      const fixed = fixText(text);
-      assert.ok(sameMarkdown(fixed, text), text);
-      assert.equal(fixText(fixed), fixed, `a second fix changes nothing: ${text}`);
+  it('a reference at the inner edge of a mark moves out of it as the character, as Linear writes it', () => {
+    // In place, the character would keep the run from opening bold. Like a
+    // moved space, the character outside the mark reads as the same text.
+    const written: Array<[string, string]> = [
+      ['**&nbsp;a** start', '\u00a0**a** start'],
+      ['x **&nbsp;b** and **c&nbsp;** y', 'x \u00a0**b** and **c**\u00a0 y'],
+      ['x **d&nbsp;**', 'x **d**\u00a0'],
+      ['*&nbsp;e* f, x ~~&#160;g~~ h and _&nbsp;s_ t', '\u00a0*e* f, x \u00a0~~g~~ h and \u00a0*s* t'],
+      ['x **&nbsp;i&nbsp;** j and ***&nbsp;k*** l', 'x \u00a0**i**\u00a0 j and \u00a0***k*** l'],
+      ['x **&nbsp;&nbsp;q** r and **&ensp;o** p', 'x \u00a0\u00a0**q** r and \u2002**o** p'],
+      ['| h |\n| -- |\n| x **&nbsp;y** |', '| h |\n| -- |\n| x \u00a0**y** |\n'],
+    ];
+    for (const [input, expected] of written) {
+      assert.equal(fixText(input), expected);
+      assert.equal(fixText(expected), expected, `a second fix changes nothing: ${input}`);
+      assert.deepEqual(lintText('doc.md', expected), [], `lint is clean on the result: ${input}`);
     }
-    assert.equal(fixText('**&nbsp;a**'), '**&nbsp;a**');
   });
 
   it('reads a character outside the Basic Multilingual Plane next to the run as one character', () => {
@@ -208,8 +218,50 @@ describe('NBSP as Linear stores it', () => {
     assert.equal(fixText('Before&nbsp; ![a](x.png)&nbsp;after'), 'Before \n\n![a](x.png)\n\n after');
   });
 
-  it('other whitespace at a heading\'s or body cell\'s end still goes', () => {
-    assert.equal(fixText('### Title　\n\n| a |\n| -- |\n| b  |'), '### Title\n\n| a |\n| -- |\n| b |\n');
+  it('other whitespace outside ASCII stays around a block\'s text, but not a header cell\'s', () => {
+    assert.equal(fixText('### Title\u3000\n\n| a\u2002 |\n| -- |\n| b\u3000 |'), '### Title\u3000\n\n| a |\n| -- |\n| b\u3000 |\n');
+  });
+
+  it('a reference to other whitespace outside ASCII becomes the character, as an NBSP\'s does', () => {
+    const input = 'a&ensp;b, c&emsp;d, e&thinsp;f, g&#8239;h, i&#12288;j\n\n&ensp;lead\n\ntail&ensp;\n\n### Head&ensp;\n\n* &ensp;item\n\n> &ensp;quote\n\n| h | i |\n| --- | --- |\n| &ensp;x | y&ensp; |\n\na&#x2028;b';
+    const expected = 'a\u2002b, c\u2003d, e\u2009f, g\u202fh, i\u3000j\n\n\u2002lead\n\ntail\u2002\n\n### Head\u2002\n\n* \u2002item\n\n> \u2002quote\n\n| h | i |\n| -- | -- |\n| \u2002x | y\u2002 |\n\na\u2028b';
+    assert.equal(fixText(input), expected);
+    assert.equal(fixText(expected), expected, 'a second fix changes nothing');
+    assert.equal(fixText('1.&ensp;one'), '1\\. one');
+  });
+
+  it('a header cell drops a reference to whitespace around its text, which Linear drops on the next write', () => {
+    for (const cell of ['&nbsp;a', 'a&nbsp;', '&nbsp;', '&ensp;a', '\u00a0&nbsp;a\u00a0']) {
+      const text = fixText(`| ${cell} | b |\n| --- | --- |\n| x | y |`);
+      assert.equal(text, `| ${cell === '&nbsp;' ? '' : 'a'} | b |\n| -- | -- |\n| x | y |\n`, cell);
+    }
+  });
+
+  it('a byte order mark reference stays a reference, also where the text then starts with it', () => {
+    // As the first character, the mark would be read as the file's and dropped with the text after it.
+    for (const text of ['&#xFEFF;a', '\n&#xFEFF;Tip', 'a&#xFEFF;b']) {
+      const fixed = fixText(text);
+      assert.equal(fixed, text.trimStart(), text);
+      assert.equal(fixText(fixed), fixed, `a second fix changes nothing: ${JSON.stringify(text)}`);
+    }
+  });
+
+  it('keeps a reference whose character the parser reads as whitespace beside a delimiter run', () => {
+    for (const text of ['**&#x2028;**', 'x **&#x2029;** y']) assert.equal(fixText(text), text);
+  });
+
+  it('a number and a dot before a reference to wide space only stay as written', () => {
+    // As the character, the space would leave a paragraph of only a number (`number-paragraph`).
+    assert.equal(fixText('3\\.&ensp;'), '3\\.&ensp;');
+  });
+
+  it('a capture takes the escaped number Linear writes before a wide space', () => {
+    assert.equal(fixLinearText('3. Steps', '', () => false), '3\\. Steps');
+  });
+
+  it('a reference moves out of a mark that holds a link after it', () => {
+    assert.equal(fixText('x **&nbsp;[Tip](https://a.test)** y'), 'x  [**Tip**](<https://a.test>) y');
+    assert.equal(fixText('x **[Tip](https://a.test)&nbsp;** y'), 'x [**Tip**](<https://a.test>)  y');
   });
 
   it('keeps a body that is only an NBSP', () => {
@@ -331,6 +383,23 @@ describe('a code span over lines, as Linear writes it', () => {
     });
   }
 
+  it('keeps a tab a quote\'s sign takes in part as a tab, as Linear reads it', () => {
+    // `>` and one column of the tab are the prefix; Linear keeps the tab whole in the code.
+    for (const [input, expected] of [
+      ['> Quote `alpha\n>\tbeta` end', '> Quote `alpha \tbeta` end'],
+      ['> Two `alpha\n>  \tbeta` end', '> Two `alpha  \tbeta` end'],
+      ['> > Inner `alpha\n> >  \tbeta` end', '> > Inner `alpha  \tbeta` end'],
+    ]) {
+      assert.equal(fixText(input!), expected, input);
+      assert.equal(fixText(expected!), expected, 'the result is a fixed point');
+      assert.deepEqual(lintText('doc.md', expected!), [], 'lint is clean on the result');
+    }
+    // A tab the sign takes whole goes, and one an item takes from keeps its other columns as spaces.
+    assert.equal(fixText('> > Nest `alpha\n> >\tbeta` end'), '> > Nest `alpha beta` end');
+    assert.equal(fixText('> 1. Num `alpha\n>\t   beta` end'), '> 1. Num `alpha   beta` end');
+    assert.equal(fixText('> * Bullet `alpha\n>\t beta` end'), '> * Bullet `alpha  beta` end');
+  });
+
   it('keeps the columns of a tab an item\'s prefix takes in part as spaces', () => {
     // The item takes two of the tab's four columns: two stay code text.
     assert.equal(fixText('* Item `alpha\n\tbeta` end'), '* Item `alpha   beta` end');
@@ -350,6 +419,62 @@ describe('a code span over lines, as Linear writes it', () => {
 
   it('an image\'s alt text keeps its lines', () => {
     assert.equal(fixText('* ![a `x\n  y` b](x.png)'), '* ![a `x\n  y` b](x.png)');
+  });
+});
+
+describe('a code span\'s fence and padding, as Linear writes them', () => {
+  // [name, input, what fix writes]
+  const written: Array<[string, string, string]> = [
+    ['code without a backtick goes between single backticks', 'Wide ``alpha`` and ````beta```` end.', 'Wide `alpha` and `beta` end.'],
+    ['the padding Markdown strips goes', 'One ` alpha beta ` end.', 'One `alpha beta` end.'],
+    ['also over lines', 'Lines ` alpha\nbeta ` end.', 'Lines `alpha beta` end.'],
+    ['and in an item, a quote, a heading, a link label and a table cell', '* ` a `\n\n> ` b `\n\n# ``c``\n\n[``d``](https://a.test)\n\n| ` e ` |\n| -- |\n| ``f`` |', '* `a`\n\n> `b`\n\n# `c`\n\n[`d`](<https://a.test>)\n\n| `e` |\n| -- |\n| `f` |\n'],
+    ['code with a backtick goes between one backtick more than its longest run, padded', 'Mid ``a`b`` and ` `` ` and ```` a`b``c ```` end.', 'Mid `` a`b `` and ``` `` ``` and ``` a`b``c ``` end.'],
+    ['and keeps a space at its end', 'Tick space ``alpha ` `` end.', 'Tick space `` alpha `  `` end.'],
+  ];
+  for (const [name, input, expected] of written) {
+    it(name, () => {
+      assert.equal(fixText(input), expected);
+      assert.ok(sameMarkdown(input, expected), 'the same document');
+      assert.equal(fixText(expected), expected, 'the result is a fixed point');
+      assert.deepEqual(lintText('doc.md', expected), [], 'lint is clean on the result');
+    });
+  }
+
+  it('keeps code Linear keeps as written', () => {
+    for (const text of ['` alpha` `alpha ` ` ` `  ` `` `alpha` `` `` `alpha `` `` ` ``', 'Tab `\talpha\t` and `\u00a0alpha\u00a0`', '| `a \\| b` |\n| -- |\n| x |\n']) {
+      assert.equal(fixText(text), text, text);
+      assert.deepEqual(lintText('doc.md', text), [], text);
+    }
+  });
+
+  it('keeps a fence a backtick outside text and code would pair with', () => {
+    // An alt text's backtick in a table cell would open a single-backtick span.
+    const cell = '| A |\n| -- |\n| ![a ` b](x.png) ``c`` |\n';
+    assert.equal(fixText(cell), cell);
+    assert.equal(fixText('| A |\n| -- |\n| ![a b](x.png) ``c`` |'), '| A |\n| -- |\n| ![a b](x.png) `c` |\n');
+    // A lone backtick in text gets its backslash, so the fence can shrink.
+    assert.equal(fixText('a ` b ``c`` d'), 'a \\` b `c` d');
+  });
+
+  it('finds the longest backtick run of large code', () => {
+    const code = 'a`'.repeat(124_990); // Near the content limit: too many runs to spread into arguments.
+    assert.equal(fixText(`\`\`${code}a\`\``), `\`\` ${code}a \`\``);
+  });
+
+  it('writes a quote\'s tab Linear keeps in code that would otherwise be spaces alone', () => {
+    // Markdown reads the tab's columns as three spaces; Linear holds a space and a tab.
+    assert.equal(fixText('> `\n>\t`'), '> ` \t`');
+    assert.deepEqual(lintText('doc.md', '> `\n>\t`'), []);
+  });
+
+  it('leaves code to its author whose outer spaces Linear drops', () => {
+    // Linear keeps the code but writes it without the padding that keeps its outer spaces.
+    for (const text of ['Two `  alpha  ` end.', 'Spaces `   ` end.', 'Wide ``  alpha  `` end.']) {
+      assert.equal(fixText(text), text, text);
+      assert.deepEqual(lintText('doc.md', text).map(({ rule }) => rule), ['code-span-padding'], text);
+      assert.deepEqual(lintInTree('doc.md', text, new Set()), [], 'the sync sends it as it is');
+    }
   });
 });
 
@@ -742,8 +867,9 @@ describe('text split off at an image', () => {
 
   it('writes a code span that would open a fence on one line, without a backslash', () => {
     // Escaping its backticks would end the span; on one line it opens no fence.
+    // Linear writes it between single backticks, as any code without one.
     const once = fixText('Before ![a](x.png) ```js\nfoo``` y');
-    assert.equal(once, 'Before\n\n![a](x.png)\n\n```js foo``` y');
+    assert.equal(once, 'Before\n\n![a](x.png)\n\n`js foo` y');
     assert.equal(fixText(once), once, 'a second fix changes nothing');
   });
 });
@@ -2153,5 +2279,20 @@ describe('what fix leaves alone', () => {
       '**Sync conflict: end**',
     ].join('\n');
     assert.equal(fixText(conflict), conflict);
+  });
+});
+
+describe('Linear\'s content limit', () => {
+  it('an escape may take a document at the limit over it; lint then reports it for the author', () => {
+    // `fix` writes Linear's form even past the limit, and `content-too-long`
+    // leaves the decision to the author.
+    for (const tail of ['a~b', 'a `b']) {
+      const text = `${'x'.repeat(CONTENT_LIMIT - tail.length - 2)}\n\n${tail}`;
+      assert.deepEqual(lintText('doc.md', text), [], tail);
+      const fixed = fixText(text);
+      assert.equal(fixed.length, CONTENT_LIMIT + 1, tail);
+      assert.deepEqual(lintText('doc.md', fixed).map((finding) => finding.rule), ['content-too-long'], tail);
+      assert.equal(fixText(fixed), fixed, `a file over the limit is left as it is: ${tail}`);
+    }
   });
 });

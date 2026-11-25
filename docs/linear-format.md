@@ -328,11 +328,18 @@ Inline text:
   written `%25`, so the link still names the same file.
 - A code span that runs over lines is written on one line, as Linear
   writes it: each line ending becomes a space, and the next line's
-  indentation past its quote or list prefix stays code text (a tab the prefix
-  takes in part leaves its other columns as spaces). `` `make `` on
+  indentation past its quote or list prefix stays code text (a tab a list
+  prefix takes in part leaves its other columns as spaces; one a quote's `>`
+  takes in part stays a tab, as Linear reads it). `` `make `` on
   one line and `` all` `` on the next becomes `` `make all` ``. A code span
   in an image's alt text keeps its lines, and so does one whose joined line
   would hold a `|`, which could make it a table's head row.
+- A code span is written between as few backticks as Linear uses: one,
+  or one more than the longest run of backticks in the code, with a space
+  inside each fence only when the code holds a backtick. ``` ``make`` ```
+  becomes `` `make` ``, and the padding Markdown strips goes:
+  `` ` make ` `` becomes `` `make` ``. Code whose outer spaces Linear
+  would drop is reported as [`code-span-padding`](#code-span-padding).
 - Reference links and images are written inline, and their definitions go.
 - Literal square brackets in text are escaped, including those written as
   character references. For example, `# [Shelf] Inventory` becomes
@@ -363,10 +370,16 @@ Inline text:
 - Character references to characters outside ASCII become the characters,
   and so does `&amp;` unless a reference follows it:
   `Fish &amp; chips &mdash; &copy;` becomes `Fish & chips — ©`.
-  `&nbsp;` becomes the nonbreaking space Linear stores for it. Next to `*`,
-  `_` or `~`, a reference stays when its character would change what they
-  mark. A nonbreaking space at the end of a heading stays, as Linear keeps
-  it; spaces and tabs there go.
+  `&nbsp;` becomes the nonbreaking space Linear stores for it, and other
+  whitespace references such as `&ensp;` or `&#12288;` become their
+  characters too. At the inner edge of bold, italic or strikethrough the
+  character moves out of it, as Linear writes it: in `x **&nbsp;Tip** y`
+  the nonbreaking space is written before `**Tip**`. Elsewhere
+  next to `*`, `_` or `~`, a reference stays when its character would
+  change what they mark. Such a space at the start or end of a paragraph,
+  heading, item, quote or body cell stays, as Linear keeps it; spaces and
+  tabs there go. Around a header cell's text it goes, since Linear drops it
+  on its next write.
   Asterisk references such as `&#42;` become `\*`. Other ASCII references,
   such as `&lt;b&gt;`, `&quot;` and `&#65;`, stay as written.
 - A space reference (`&#32;`, `&#x20;`) becomes a space, as Linear stores
@@ -571,16 +584,17 @@ to the page instead.
 
 ### `content-too-long`
 
-This document exceeds Linear's 250,000-character content limit. The author
-must decide how to shorten or split it. Linear refuses the whole document.
-The limit counts Unicode code points of the text after the front matter.
-Such a document is not checked further, so `content-too-long` is its only
-finding.
+This document exceeds Linear's 250,000-character content limit. Linear
+refuses the whole document, so the sync leaves the file out until it fits.
+The author must decide how to shorten or split it. The limit counts Unicode
+code points of the text after the front matter. Such a document is not
+checked further, so `content-too-long` is its only finding.
 
 `fix` leaves a file already over the limit as it is. A rewrite can take a
-file past the limit, for example when `fix` writes a bare URL as a link:
-`fix` saves the rewrite and reports `content-too-long`, and `lint` and both
-hooks fail on the file until the author shortens or splits it.
+file past the limit, for example when `fix` writes a bare URL as a link or
+escapes a character as Linear does: `fix` saves the rewrite and reports
+`content-too-long`, and `lint` and both hooks fail on the file until the
+author shortens or splits it.
 
 ```text
 A 260 KB log pasted into one Markdown file.
@@ -767,6 +781,20 @@ file as it is.
 Total
 | --- |
 | 5 |
+```
+
+### `code-span-padding`
+
+Linear drops a space at each end of inline code that starts and ends with a
+space, or that holds only three spaces or more, so the code reads
+differently. Remove the spaces at the ends of the code, or keep a space at
+one end only; write code of spaces alone as one or two spaces. Linear keeps the code itself, but writes it without the
+padding that keeps its outer spaces: the example below comes back as
+`` ` total ` ``, which reads as `total`. `lint` reports the line and `fix`
+leaves the file as written; the sync sends it as it is.
+
+```markdown
+Run `  total  ` here.
 ```
 
 ### `hard-break-in-heading`
