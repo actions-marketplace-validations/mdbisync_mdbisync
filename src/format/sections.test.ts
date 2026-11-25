@@ -139,7 +139,7 @@ describe('triple-plus section markers', () => {
     ['escaped marker', '\\+++\n\nSeeds', '\\+++\n\nSeeds'],
     ['fenced marker', '```\n+++\n```', '```\n+++\n```'],
     ['multiline link label', 'Read [the\n+++\nnotes](/notes).', 'Read [the\n+++\nnotes](</notes>).'],
-    ['a code span does not affect a later marker', '`first\n+++\nlast`\n\n+++\n\nSeeds', '`first\n+++\nlast`\n\n+++ \n\nSeeds\n\n+++'],
+    ['a code span does not affect a later marker', '`first\n+++\nlast`\n\n+++\n\nSeeds', '`first +++ last`\n\n+++ \n\nSeeds\n\n+++'],
     ['marker inside display math', '$$\na\n+++\nb\n$$', '```math\na\n+++\nb\n```'],
     ['marker inside a table row', '| a |\n| - |\n| b |\n+++\nSeeds', '| a |\n| -- |\n| b |\n| +++ |\n| Seeds |\n'],
     ['open code fence at end of section', '+++\n\n```\nSeeds', '+++ \n\n```\nSeeds\n```\n\n+++'],

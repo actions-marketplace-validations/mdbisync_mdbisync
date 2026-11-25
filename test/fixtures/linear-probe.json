@@ -169,6 +169,14 @@
       "yjs": "recorded",
       "fixedPoint": true
     },
+    "construct-singles/code-span-lazy-dash-line.md": {
+      "yjs": "recorded",
+      "fixedPoint": true
+    },
+    "construct-singles/code-span-lines.md": {
+      "yjs": "recorded",
+      "fixedPoint": true
+    },
     "construct-singles/collapsible-opener-containers.md": {
       "yjs": "recorded",
       "fixedPoint": true
@@ -390,6 +398,10 @@
       "fixedPoint": true
     },
     "construct-singles/literal-underscore.md": {
+      "yjs": "recorded",
+      "fixedPoint": true
+    },
+    "construct-singles/nbsp-forms.md": {
       "yjs": "recorded",
       "fixedPoint": true
     },
