@@ -15,6 +15,7 @@ import { normalizeUri } from 'micromark-util-sanitize-uri';
 import { findMarkerLines } from '../merge/markers.ts';
 import { lintText, overContentLimit, paddingOverLimit, referencesOverLimit } from './lint.ts';
 import { CONTENT_LIMIT, FIXED_RULES, IMAGE_PLACE_RULES, type Finding } from './rules.ts';
+import { plusLinesAsLinear } from './marker-lines.ts';
 import { plusSectionsAsLinear, sectionOpenersAsLinear } from './sections.ts';
 import { tabReferences } from './tab-reference.ts';
 import { ALERT, LINKED_BOLD_ITALIC_SUFFIX, MarkdownLimitError, advanceColumn, bracketedLabel, codeSpans, decodedDestinationPath, end, hasOuterStars, imageDestination, isCallout, isCalloutComment, joinFile, codeSpanText, linearDropsCodeSpaces, linearMarkersAsText, linkDestination, listKind, listParts, nestedFileBlocksOnItemLine, nestsMarkerText, opensWithText, parse, quoteLines, sameMarkdown, splitFile, start, visit, withoutTrailingNewlines, endingRow } from './markdown.ts';
@@ -78,7 +79,10 @@ export function fixText(text: string, options: FixOptions = {}): string {
   // right above a list numbered other than 1, which Linear writes on the next
   // line, where Markdown reads it as text (`list-after-item-text`).
   if (lf !== ended && lintText('', fixed, { linearExport: options.linearExport === true }).some((finding) => finding.rule === 'list-after-item-text')) return text;
-  return joinFile(head, fixed);
+  // After the rest: a lone plus sign can also reach an item's second line
+  // when the item's text moves onto its marker line or a code span is joined.
+  // Linear's own export is captured as it is: the no-break space is a character.
+  return joinFile(head, options.linearExport === true ? fixed : plusLinesAsLinear(fixed));
 }
 
 /** Lint findings that leave a file to its author. */
@@ -518,6 +522,9 @@ const BLOCK_START = new RegExp(String.raw`^(?:[<>#*+\-=_\`~|]|\d{1,9}[.)]|\d+\\?
 
 // A number with a dot and text after it, which `fix` escapes where it starts a paragraph line.
 const NUMBER_TEXT = new RegExp(String.raw`^\d+\\?\.[ \t${WIDE_SPACE}]+[^ \t${WIDE_SPACE}]`);
+// An escaped `-` before whitespace or the line's end, or an escaped `+` before
+// text, after a paragraph line's own indentation (`escapedMarkerLine`).
+const ESCAPED_MARKER = /^([ \t]*)\\(?:-(?:[ \t]|$)|\+[ \t]+[^ \t])/;
 
 // A space or tab reference ending the text before it.
 const SPACE_REFERENCE_BEFORE = /&#(?:0*(?:32|9)|[xX]0*(?:20|9));$/;
@@ -1110,6 +1117,11 @@ class Writer {
         edits.push(...marker);
         break;
       }
+      const escapedMarker = paragraph === undefined || inside(code, at) ? undefined : this.escapedMarkerLine(at + 1, paragraph.texts);
+      if (escapedMarker !== undefined) {
+        edits.push(escapedMarker);
+        continue;
+      }
       const continuation = this.continuation(at + 1, inside(code, at), paragraph !== undefined && !inside(paragraph.html, at), paragraph?.texts);
       edits.push(continuation);
       if (paragraph === undefined || continuation.underline) continue;
@@ -1127,6 +1139,34 @@ class Writer {
     }
     out += this.source.slice(at, to);
     return out;
+  }
+
+  /**
+   * The edit for a paragraph line that continues with an escaped `-` or `+`
+   * (`\\- step`) one to three columns past its container's content: Linear
+   * drops the escape there, and the line becomes a list item. At the
+   * content's column Linear keeps it, and a paragraph line's indentation is
+   * no part of its text: the line is written there, without its own
+   * indentation. Undefined for any other line.
+   */
+  private escapedMarkerLine(lineStart: number, texts: ReadonlyArray<readonly [number, number]>): Edit | undefined {
+    if (this.fileBlockIndent > 0) return undefined;
+    const newline = this.source.indexOf('\n', lineStart);
+    const line = this.source.slice(lineStart, newline === -1 ? undefined : newline);
+    // A lazy line keeps what follows the prefixes it has; `fix` writes the
+    // others in front of it.
+    const { at, pad } = this.prefixEnd(lineStart, line);
+    const marker = ESCAPED_MARKER.exec(this.source.slice(at, lineStart + line.length));
+    if (marker === null) return undefined;
+    const backslash = at + marker[1]!.length;
+    if (!texts.some(([a, b]) => a <= backslash && backslash < b)) return undefined;
+    // The columns past the prefixes `fix` writes (`> ` for a quote), where
+    // a tab can span fewer columns than in the source.
+    if (this.containers.some((container) => container.kind === 'item' && container.written === undefined)) return undefined;
+    const prefix = this.containers.reduce((sum, container) => sum + (container.kind === 'item' ? container.written! : 2), 0);
+    const past = [...' '.repeat(pad), ...this.source.slice(at, backslash)].reduce(advanceColumn, prefix) - prefix;
+    if (past < 1 || past > 3) return undefined;
+    return { from: lineStart, to: backslash, text: '' };
   }
 
   /**
