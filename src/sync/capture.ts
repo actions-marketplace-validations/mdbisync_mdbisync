@@ -93,6 +93,11 @@ export interface CaptureResult {
   containers?: Map<string, LinearDocument[]>;
   /** Documents whose conflict notice this capture's marks set or resolved. */
   conflictNotices: ConflictNotices;
+  /**
+   * Suspended documents this capture read again for its version (see `readByOtherVersion`) whose reading is what the
+   * tracked branch holds, by path: also those whose recorded reading already was, so their record does not change.
+   */
+  rereadAsTracked?: string[];
 }
 
 const CURSOR = /^Capture-through: (\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{3}Z)$/m;
@@ -806,6 +811,8 @@ export async function capture(context: RunContext, options: CaptureOptions): Pro
     for (const [id, candidate] of candidates) {
       const old = byId.get(id);
       const converged = reread.has(id) && readsAsTracked(candidate.path, String(candidate.files.get(candidate.path)));
+      // The lane takes the tracked file for it, though the record may hold this reading already.
+      if (converged) (result.rereadAsTracked ??= []).push(candidate.path);
       if (old?.path === candidate.path && !converged && await asLastAccepted(candidate)) {
         // The reading stays as recorded; the version that read it again is noted, so it is not read on every run.
         if (reread.has(id)) ids.set(old.path, {...old.entry, capturedWith: VERSION});
@@ -817,8 +824,10 @@ export async function capture(context: RunContext, options: CaptureOptions): Pro
         ids.delete(old.path);
         result.removed.push(old.path);
       }
-      // Only a suspended document needs the version of its reading: noting it on every entry would rewrite them all.
-      const entry = {...old?.entry, id, observedDigest: observedDigest(candidate.doc), ...(old?.entry.suspended === undefined ? {} : {capturedWith: VERSION})};
+      // Only a suspended document needs the version of its reading: noting it on every entry would rewrite them all. One
+      // that reads as the tracked file keeps the older version until the lane takes that file (`rereadAsTracked`): the
+      // lane notes the version with its push, so a run that stops before it reads the document again.
+      const entry = {...old?.entry, id, observedDigest: observedDigest(candidate.doc), ...(old?.entry.suspended === undefined || converged ? {} : {capturedWith: VERSION})};
       delete entry.pullRewrite;
       const plainFiles = [...new Set([...(old?.entry.plainFiles ?? []), ...(candidate.assets.plainFiles ?? [])])];
       if (plainFiles.length > 0) entry.plainFiles = plainFiles;
