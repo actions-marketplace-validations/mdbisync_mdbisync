@@ -1,7 +1,8 @@
 // Pull repairs are separate from the record of what Linear actually holds.
+import type { Nodes } from 'mdast';
 import { toMarkdown } from 'mdast-util-to-markdown';
-import { parse, visit, start, end, line, allowedLink } from '../format/markdown.ts';
-import { CONTENT_LIMIT, linkDestination } from '../format/index.ts';
+import { parse, visit, start, end, line, allowedLink, linkDestination } from '../format/markdown.ts';
+import { CONTENT_LIMIT } from '../format/rules.ts';
 import { message } from '../messages.ts';
 
 export interface ImageRewrite { image: number; total: number; line: number }
@@ -26,6 +27,11 @@ function text(value: string): string {
   return toMarkdown({type: 'root', children: [{type: 'paragraph', children: [{type: 'text', value}]}]}).trimEnd();
 }
 
+/** Text inside the label of the link around an image: a `]` the serializer leaves bare would end that label. */
+function linkLabelText(value: string): string {
+  return text(value).replace(/(\\*)\]/g, (bracket, backslashes: string) => backslashes.length % 2 === 0 ? `${backslashes}\\]` : bracket);
+}
+
 /**
  * A link as Linear stores it: the destination in angle brackets, as `fix` writes it, so the repaired file
  * equals the document Linear holds after the write-back byte for byte. The serializer escapes the label.
@@ -44,8 +50,37 @@ function destinationOf(link: string): string {
   return url;
 }
 
-/** Rewrites parsed nodes only; code examples and unrelated source spelling stay intact. */
-export function imageLinks(body: string, deadUploads: ReadonlySet<string> = new Set(), onlyImages?: ReadonlySet<number>) {
+/** An image destination on the web: `fix` writes it as a link, as a pull repairs it. */
+const WEB_IMAGE = /^https?:/i;
+
+/**
+ * `fix`: images whose destination is an HTTP(S) URL become links, as `imageLinks` repairs them on a pull.
+ * Nothing else changes: links `lint` refuses stay for their author. Undefined when there is no such image.
+ */
+export function webImageLinks(body: string): { body: string; lines: number[] } | undefined {
+  checkImageRepairSize(body);
+  const tree = parse(body);
+  const definitions = new Map<string, {url: string; title?: string | null | undefined}>();
+  visit(tree, node => { if (node.type === 'definition' && !definitions.has(node.identifier)) definitions.set(node.identifier, node); });
+  const selected = new Set<number>();
+  let index = 0;
+  visit(tree, node => {
+    if (node.type !== 'image' && node.type !== 'imageReference') return;
+    index++;
+    const definition = node.type === 'image' ? node : definitions.get(node.identifier);
+    // A title would be lost: `image-title` leaves it to the author.
+    if (definition !== undefined && WEB_IMAGE.test(definition.url) && !definition.title) selected.add(index);
+  });
+  if (selected.size === 0) return undefined;
+  const repair = imageLinks(body, new Set(), selected, 'fix');
+  return {body: repair.body, lines: repair.images.map(image => image.line)};
+}
+
+/**
+ * Rewrites parsed nodes only; code examples and unrelated source spelling stay intact. A pull (`mode` 'pull')
+ * also removes links with a refused scheme and keeps live uploads as images; `fix` changes only the selected images.
+ */
+export function imageLinks(body: string, deadUploads: ReadonlySet<string> = new Set(), onlyImages?: ReadonlySet<number>, mode: 'pull' | 'fix' = 'pull') {
   checkImageRepairSize(body);
   const simple = simpleImageParagraph(body, onlyImages);
   if (simple !== undefined) return simple;
@@ -55,6 +90,7 @@ export function imageLinks(body: string, deadUploads: ReadonlySet<string> = new 
   visit(tree, node => { if (node.type === 'definition' && !definitions.has(node.identifier)) definitions.set(node.identifier, node.url); });
   const linkChecks = new Map<string, boolean>();
   const permitted = (url: string) => {
+    if (mode === 'fix') return true;
     const cached = linkChecks.get(url);
     if (cached !== undefined) return cached;
     const allowed = allowedLink(url);
@@ -91,7 +127,7 @@ export function imageLinks(body: string, deadUploads: ReadonlySet<string> = new 
     if (onlyImages !== undefined && !onlyImages.has(index)) return;
     let upload = false;
     try { const parsed = new URL(url); upload = parsed.protocol === 'https:' && parsed.hostname === 'uploads.linear.app' && parsed.port === '' && parsed.username === '' && parsed.password === ''; } catch {}
-    if (upload && !deadUploads.has(url.split('#')[0]!) && !deadUploads.has(url) && !ancestors.some(parent => parent.type === 'link' || parent.type === 'linkReference')) return;
+    if (mode === 'pull' && upload && !deadUploads.has(url.split('#')[0]!) && !deadUploads.has(url) && !ancestors.some(parent => parent.type === 'link' || parent.type === 'linkReference')) return;
     images.push({image: index, total: count, line: line(node)});
     if (enclosingRemoved) return;
     let replacement: Pick<Edit, 'text' | 'url'> = {text: ''};
@@ -103,10 +139,26 @@ export function imageLinks(body: string, deadUploads: ReadonlySet<string> = new 
       const cached = replacements.get(key);
       if (cached !== undefined) replacement = cached;
       else {
-        const rendered = inLink ? text(label) : linearLink(label, url);
+        const rendered = inLink ? linkLabelText(label) : linearLink(label, url);
         const value = inTable ? rendered.replace(/\|/g, '&#124;') : rendered;
         replacement = {text: value, ...(value.startsWith('[') ? {url: destinationOf(value)} : {})};
         replacements.set(key, replacement);
+      }
+    } else {
+      // Linear drops a link left without text, and its URL with it: the first removed image's
+      // alt text, or else the link's URL, becomes its text, as `fix` writes a link without text.
+      const link = ancestors.at(-1);
+      const linkUrl = link?.type === 'link' ? link.url : link?.type === 'linkReference' ? definitions.get(link.identifier) : undefined;
+      const removed = (child: Nodes) => {
+        if (child.type !== 'image' && child.type !== 'imageReference') return false;
+        const source = child.type === 'image' ? child.url : definitions.get(child.identifier);
+        return source !== undefined && (source === '' || !permitted(source));
+      };
+      const children: Nodes[] = link !== undefined && 'children' in link ? link.children : [];
+      if (linkUrl && children.every(child => removed(child) || (child.type === 'text' && child.value.trim() === '')) && children.find(removed) === node) {
+        const label = linkLabelText(node.alt || linkUrl);
+        // A table row is one line.
+        replacement = {text: ancestors.some(parent => parent.type === 'tableCell') ? label.replace(/\|/g, '&#124;').replace(/\n/g, ' ') : label};
       }
     }
     // A long definition can be expanded by many references to it.
@@ -115,7 +167,7 @@ export function imageLinks(body: string, deadUploads: ReadonlySet<string> = new 
     edits.push({from: start(node) + offset, to: end(node) + offset, ...replacement});
   });
   // Remove unused dangerous definitions too: they must not survive as file-upload inputs.
-  visit(tree, node => { if (node.type === 'definition' && !permitted(node.url)) edits.push({from: start(node) + offset, to: end(node) + offset, text: ''}); });
+  if (mode === 'pull') visit(tree, node => { if (node.type === 'definition' && !permitted(node.url)) edits.push({from: start(node) + offset, to: end(node) + offset, text: ''}); });
   // Only some callers need the text; the check below parses it once more.
   let repaired: string | undefined;
   return {images, get body() { return repaired ??= rewrite(body, tree, offset, edits); }};

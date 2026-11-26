@@ -4,20 +4,17 @@
 // it holds the merge result: a write, a rename or move, a create or a trash.
 
 import { createHash } from 'node:crypto';
-import { mkdtemp, rm } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
-import { join } from 'node:path';
 import { readAnnotation } from '../mapping/index.ts';
 import { MAPPING_FILE_BYTES, MAPPING_TREE_BYTES, MappingBlobBudget, MappingBlobBudgetError, readableBlob } from '../mapping/blobs.ts';
 import { mapTree, requireReadableAnnotations } from '../mapping/mapping.ts';
-import { type TreeEntry, parseTreeListing } from '../state/objects.ts';
+import { type TreeEntry, listPaths } from '../state/objects.ts';
 import { lintInTree, splitFile } from '../format/index.ts';
 import { LINEAR_FACTS, type LinearFacts, lengthRefusal } from '../linear/index.ts';
 import { MARKDOWN_EXTENSION, type MappedDocument, type Place, type RepositoryMapping } from '../mapping/index.ts';
 import { findFileLinks } from '../initial-sync/uploads.ts';
 import { type StructuralResult, type StructuralSummary, type Version, detectConflicts, mergeMarkdown, resolveStructural } from '../merge/index.ts';
 import { MarkdownLimitError } from '../format/markdown.ts';
-import { type Git, type IdMap, type Oid, INITIAL_SYNC_FROM_LINEAR_RECORD, NEUTRAL_IDENTITY, buildTree, checkRepoPath, commitTree, isAncestor, listTree, readBlobs, readIds } from '../state/index.ts';
+import { type Git, type IdMap, type Oid, INITIAL_SYNC_FROM_LINEAR_RECORD, NEUTRAL_IDENTITY, buildTree, checkRepoPath, commitTree, isAncestor, listTree, placeEntries, readBlobs, readIds, showCommit } from '../state/index.ts';
 import { message } from '../messages.ts';
 import { type FileLeftOutRule } from '../codes.ts';
 
@@ -133,7 +130,7 @@ export async function mergeLocally(git: Git, linear: Oid, tracked: Oid, ids: IdM
   const frozen = new Set([...ids].flatMap(([path, entry]) => entry.suspended === undefined ? [] : [path, ...entry.suspended.paths]));
   const released = [...ids].filter(([, entry]) => entry.releaseBase !== undefined);
   if (frozen.size > 0 || released.length > 0) {
-    mergeBase ??= await git.text(['merge-base', linear, tracked]);
+    mergeBase ??= await mergeBaseOf(git, linear, tracked);
     let baseTree = mergeBase;
     const releaseGroups = new Map<Oid, Set<string>>();
     for (const [path, entry] of released) {
@@ -320,7 +317,7 @@ export interface MarkedMerge {
  * only.
  */
 export async function mergeWithMarkers(git: Git, linearSide: Oid, gitSide: Oid, ids: IdMap, knownId?: MergeOptions['knownId'], explicitBase?: Oid, echo = false): Promise<MarkedMerge> {
-  const base = explicitBase ?? await git.text(['merge-base', linearSide, gitSide]);
+  const base = explicitBase ?? await mergeBaseOf(git, linearSide, gitSide);
   const merged = await git.run(['merge-tree', '--write-tree', '--name-only', '--no-messages', '-z', ...(explicitBase === undefined ? [] : [`--merge-base=${explicitBase}`]), linearSide, gitSide], { okCodes: [0, 1] });
   const [gitTree, ...rest] = merged.stdout.toString('utf8').split('\0');
   if (gitTree === undefined || !/^[0-9a-f]{40,64}$/.test(gitTree)) throw new Error(message('sync.no-merge-tree'));
@@ -445,13 +442,12 @@ async function linkedFiles(git: Git, commits: readonly Oid[], path: string): Pro
   for (const commit of commits) {
     const object = `${commit}:${path}`;
     // The commit removed the file: that version links nothing.
-    const result = await git.run(['cat-file', '-s', object], { okCodes: [0, 128], maxOutputBytes: 64 });
-    const size = Number(result.stdout.toString('utf8'));
-    if (result.code !== 0 || !Number.isSafeInteger(size) || size < 0 || size > MAPPING_FILE_BYTES) continue;
-    const blob = await git.run(['cat-file', 'blob', object], { okCodes: [0, 128], maxOutputBytes: MAPPING_FILE_BYTES });
-    if (blob.code !== 0) continue;
+    const found = await git.objectInfo(object);
+    if (found === null || found.type !== 'blob' || found.size > MAPPING_FILE_BYTES) continue;
+    const blob = await git.readBlob(found.oid);
+    if (blob === null) continue;
     try {
-      for (const link of findFileLinks(path, splitFile(blob.stdout.toString('utf8')).body, () => true)) {
+      for (const link of findFileLinks(path, splitFile(blob.toString('utf8')).body, () => true)) {
         if (!link.target.endsWith(MARKDOWN_EXTENSION)) linked.add(link.target);
       }
     } catch (error) {
@@ -663,8 +659,7 @@ async function resolveConflicts(git: Git, input: ConflictInput): Promise<Resolve
 function echoedConflicts(git: Git, linear: Oid): (base: TreeEntry, tracked: TreeEntry, linearEntry: TreeEntry) => Promise<{ base: string; linear: string } | null> {
   const budget = new MappingBlobBudget();
   const entryAt = async (commit: Oid, path: string): Promise<TreeEntry | undefined> => {
-    const { stdout } = await git.run(['--literal-pathspecs', 'ls-tree', '-z', '-l', '--full-tree', commit, '--', path]);
-    return parseTreeListing(stdout).find((entry) => entry.path === path && entry.type === 'blob' && readableBlob(entry));
+    return (await listPaths(git, commit, [path])).find((entry) => entry.path === path && entry.type === 'blob' && readableBlob(entry));
   };
   const textOf = async (entry: TreeEntry) => (await budget.read(git, [entry])).get(entry.oid)!.toString('utf8');
   const versions = async (base: TreeEntry, tracked: TreeEntry, linearEntry: TreeEntry) => {
@@ -677,11 +672,19 @@ function echoedConflicts(git: Git, linear: Oid): (base: TreeEntry, tracked: Tree
     if (previous === undefined || recordGit?.oid !== base.oid) return null;
     const previousText = await textOf(previous);
     if (detectConflicts(previousText).length > 0) return null;
-    const merged = await git.run(['merge-base', parent, second], { okCodes: [0, 1] });
-    if (merged.code !== 0) return null;
-    const older = await entryAt(merged.stdout.toString('utf8').trim(), path);
-    const olderText = older === undefined ? '' : await textOf(older);
-    if ((await mergeMarkdown(olderText, baseText, previousText)).text !== linearText) return null;
+    const bases = lines((await git.run(['merge-base', '--all', parent, second], { okCodes: [0, 1] })).stdout.toString('utf8'));
+    if (bases.length === 0) return null;
+    // The record was merged from git's merged base, or, written by a version before that, from the first base alone.
+    let olderText: string | undefined;
+    for (const candidate of new Set([await mergedBases(git, bases), bases[0] as Oid])) {
+      const older = await entryAt(candidate, path);
+      const text = older === undefined ? '' : await textOf(older);
+      if ((await mergeMarkdown(text, baseText, previousText)).text === linearText) {
+        olderText = text;
+        break;
+      }
+    }
+    if (olderText === undefined) return null;
     const result = (await mergeMarkdown(olderText, trackedText, previousText)).text;
     if ((await mergeMarkdown(baseText, trackedText, result)).text !== result) return null;
     return { base: olderText, linear: previousText };
@@ -711,7 +714,7 @@ async function renamesBetween(git: Git, from: Oid, to: Oid): Promise<Map<string,
 
 /** Whether the tracked commit is already merged into `linear`, so there is nothing to take to Linear. */
 export async function alreadyMerged(git: Git, linear: Oid, tracked: Oid): Promise<boolean> {
-  return (await git.run(['merge-base', '--is-ancestor', tracked, linear], { okCodes: [0, 1] })).code === 0;
+  return isAncestor(git, tracked, linear);
 }
 
 /**
@@ -722,10 +725,10 @@ export async function alreadyMerged(git: Git, linear: Oid, tracked: Oid): Promis
  * nothing to write; the record stays the merge base of the next change.
  */
 export async function mergedInitialRecord(git: Git, linear: Oid, tracked: Oid): Promise<boolean> {
-  const [subject] = (await git.text(['show', '-s', '--format=%s', linear])).split('\n');
+  const [subject] = (await showCommit(git, '%s', linear)).split('\n');
   if (subject !== INITIAL_SYNC_FROM_LINEAR_RECORD) return false;
   if (!(await isAncestor(git, linear, tracked))) return false;
-  const [linearTree, trackedTree] = (await git.text(['rev-parse', `${linear}^{tree}`, `${tracked}^{tree}`])).split('\n');
+  const [linearTree, trackedTree] = await Promise.all([git.revParse(`${linear}^{tree}`), git.revParse(`${tracked}^{tree}`)]);
   return linearTree === trackedTree;
 }
 
@@ -743,24 +746,89 @@ export async function takePaths(git: Git, into: Oid, from: Oid, paths: ReadonlyS
   const entries = new Map((await listTree(git, from)).map((entry) => [entry.path, entry]));
   // A path absent from `from` is removed, which an older tree's path may be.
   for (const path of paths) checkRepoPath(path, { removal: !entries.has(path) });
-  // buildTree handles blobs; copy modes through a private index so images and symlinks stay exact.
-  const dir = await mkdtemp(join(tmpdir(), 'lane-index-'));
-  const env = { GIT_INDEX_FILE: join(dir, 'index') };
-  try {
-    await git.run(['read-tree', `${into}^{tree}`], { env });
-    const zero = '0'.repeat((await git.text(['rev-parse', '--show-object-format'])) === 'sha256' ? 64 : 40);
-    const input = [...paths].map((path) => {
-      const entry = entries.get(path);
-      return entry === undefined ? `0 ${zero}\t${path}\0` : `${entry.mode} ${entry.oid}\t${path}\0`;
-    }).join('');
-    if (input) await git.run(['update-index', '-z', '--index-info'], { env, input });
-    return await git.text(['write-tree'], { env });
-  } finally { await rm(dir, { recursive: true, force: true }); }
+  // Entries are copied with their modes, so images and symlinks stay exact.
+  return placeEntries(git, into, new Map([...paths].map((path) => [path, entries.get(path) ?? null])));
 }
 
 /** A content-only side for a merge; never pushed or used as a real lane parent. */
-export function treeCommit(git: Git, tree: Oid, parent: Oid): Promise<Oid> {
-  return commitTree(git, { base: tree, changes: new Map(), parents: [parent], message: 'Merge input', identity: NEUTRAL_IDENTITY });
+export async function treeCommit(git: Git, tree: Oid, parent: Oid): Promise<Oid> {
+  return commitTree(git, { base: tree, changes: new Map(), parents: [parent], message: 'Merge input', identity: NEUTRAL_IDENTITY, date: await newestDate(git, [parent]) });
+}
+
+/**
+ * The base git's merge of `a` and `b` starts from: their merge base, or,
+ * where the history has several (a criss-cross: the same change reached
+ * both sides by different merges), the merge of those bases, built as git
+ * builds its virtual base (each base merged into the ones before it, over
+ * their own merge base; a conflict between them stays in the text). Any
+ * one of several bases may predate a change both sides hold, and that
+ * change then reads as a conflict. The commits it writes take their
+ * parents' newest date, so the same history gives the same base.
+ */
+export async function mergeBaseOf(git: Git, a: Oid, b: Oid): Promise<Oid> {
+  // Without any base, `merge-base` exits 1 and the run stops, as before.
+  return mergedBases(git, lines(await git.text(['merge-base', '--all', a, b])));
+}
+
+/**
+ * `bases` (as `merge-base --all` lists them, at least one) merged into one
+ * commit as git merges them: in reverse order, each over its own merge
+ * base with the ones before, or over an empty tree where they share no
+ * history. Where the bases conflict, a file git could not merge to a new
+ * text (one base deleted it, or a binary) keeps the older base's version,
+ * as git's merge of bases does; a text conflict keeps its markers, of the
+ * usual length where git's are longer.
+ */
+async function mergedBases(git: Git, bases: readonly Oid[]): Promise<Oid> {
+  const [first, ...rest] = [...bases].reverse();
+  let merged = first as Oid;
+  for (const next of rest) {
+    const lower = lines((await git.run(['merge-base', '--all', merged, next], { okCodes: [0, 1] })).stdout.toString('utf8'));
+    const inner = lower.length > 0 ? await mergedBases(git, lower)
+      : await commitTree(git, { base: null, changes: new Map(), parents: [], message: 'Empty merge base', identity: NEUTRAL_IDENTITY, date: await newestDate(git, [merged, next]) });
+    const result = await git.run(['merge-tree', '--write-tree', '--no-messages', '-z', `--merge-base=${inner}`, merged, next], { okCodes: [0, 1] });
+    const [written, ...unmerged] = result.stdout.toString('utf8').split('\0');
+    if (written === undefined || !/^[0-9a-f]{40,64}$/.test(written)) throw new Error(message('sync.no-merge-tree'));
+    const tree = result.code === 0 ? written : await keepOlderVersions(git, written, unmerged);
+    merged = await commitTree(git, { base: tree, changes: new Map(), parents: [merged, next], message: 'Merged merge bases', identity: NEUTRAL_IDENTITY, skipIfUnchanged: false, date: await newestDate(git, [merged, next]) });
+  }
+  return merged;
+}
+
+/**
+ * `tree` with each conflicted path that `merge-tree` left at one side's
+ * version (a delete against an edit, a binary) set back to its base
+ * version. `stages` are merge-tree's `<mode> <oid> <stage>\t<path>` lines.
+ */
+async function keepOlderVersions(git: Git, tree: Oid, stages: readonly string[]): Promise<Oid> {
+  const byPath = new Map<string, Map<string, { mode: string; oid: Oid }>>();
+  for (const line of stages) {
+    const match = /^(\d+) ([0-9a-f]{40,64}) ([123])\t(.+)$/s.exec(line);
+    if (match === null) continue;
+    const [, mode, oid, stage, path] = match as unknown as [string, string, Oid, string, string];
+    byPath.set(path, (byPath.get(path) ?? new Map()).set(stage, { mode, oid }));
+  }
+  // Only a path a side still holds: a rename conflict lists its source with the base's stage alone, and leaves it out.
+  const older = [...byPath].filter(([, entries]) => entries.has('1') && (entries.has('2') || entries.has('3')));
+  if (older.length === 0) return tree;
+  const current = new Map((await listPaths(git, tree, older.map(([path]) => path))).map((entry) => [entry.path, entry.oid]));
+  const back = new Map<string, { mode: string; oid: Oid }>();
+  for (const [path, entries] of older) {
+    const now = current.get(path);
+    // A new text holds the merged lines and markers; anything else is one side's version or nothing.
+    if (now === undefined || now === entries.get('2')?.oid || now === entries.get('3')?.oid) back.set(path, entries.get('1')!);
+  }
+  return back.size === 0 ? tree : placeEntries(git, tree, back);
+}
+
+/** The newest committer date of `commits`, in git's raw form. */
+async function newestDate(git: Git, commits: readonly Oid[]): Promise<string> {
+  const seconds = lines(await git.text(['show', '--no-patch', '--no-show-signature', '--format=%ct', ...commits])).map(Number);
+  return `@${Math.max(...seconds)} +0000`;
+}
+
+function lines(text: string): Oid[] {
+  return text.split('\n').filter(Boolean);
 }
 
 function isReadme(path: string): boolean {

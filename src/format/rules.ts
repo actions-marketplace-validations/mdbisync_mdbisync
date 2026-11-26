@@ -14,12 +14,14 @@ export const LINT_RULES = {
   'table-escaped-pipe': 'A pipe in a plain table cell, escaped or written as a character reference, comes back from Linear unescaped, which splits the row. Put the cell text in inline code, or rephrase it without the pipe.',
   'table-hash-cell': 'A table body cell starting with # becomes a heading.',
   'table-list-cell': 'A table body cell starting with -, + or * and a space, or with a number and ), becomes a list, which Linear writes with * or a number and a dot. Put a backslash before the -, + or *, or reword the cell.',
+  'table-quote-cell': 'A table body cell starting with > becomes a quote, and Linear drops the >; a cell starting with >> can take the rows and text below it into the cell. Run fix to write it as \\>, or put a backslash before the > yourself.',
   'image-in-link': 'The link around an image is dropped.',
   'content-too-long': "This document exceeds Linear's 250,000-character content limit. Linear refuses the whole document, so the sync leaves the file out until it fits. The author must decide how to shorten or split it.",
   'markdown-complexity': 'Markdown trees over 128 levels deep or 500,000 nodes are rejected, as are tables whose short rows, padded to the header width, would add over 250,000 characters or take the tree over that node limit, reference links whose destinations, each written in full, would take the text over 250,000 characters, and paragraphs whose inline syntax, or whose many lines continued without their quote or list prefix, would take too long to parse.',
   'duplicate-title': 'Two or more files map to one document title.',
   'table-alignment': 'Table column alignment is dropped. Remove the colons from the separator row to accept that.',
   'link-scheme': 'Links must use http, https, mailto, a path or a fragment. Change the destination, or write the address as inline code.',
+  'link-without-text': 'Linear drops a link without text, and its URL with it. Run fix to write the URL as the link text, or write the text yourself; a link with neither text nor URL needs text or removal.',
   'link-title': 'A link title is dropped. Remove the title, or move its text into the link text.',
   'image-title': 'An image title is dropped from the Markdown. Remove the title, or move its text into the alt text.',
   'code-in-emphasis': 'Bold or italic around inline code is dropped from the code. Write the code without emphasis, or emphasize the words around it.',
@@ -38,14 +40,38 @@ export const LINT_RULES = {
   'list-after-item-text': 'In a list item, Linear writes a list on the line right below the text or the list of another kind before it. When its first item is empty, starts with a list, or is numbered other than 1, Markdown reads that marker as part of the text above. Start the list with an item of text, numbered 1 in a numbered list.',
   'list-number-too-long': 'An ordered list numbered past 999999999: Linear numbers its items on from the first number, and Markdown reads a number of more than nine digits as text of the item above it. Start the list at a smaller number.',
   'block-first-in-list-item': 'A list item that starts with a heading, code, a quote, a collapsible section or another block is written in a form Markdown reads as an empty item. Start the item with a line of text and put the block below it.',
+  'section-marker-text': 'A line that starts with +++ and text right after it (+++Plan) is text, but Linear opens a collapsible section from it when more of its list item, quote or document follows. Run fix to write it as \\+++Plan, or put a space after +++ to make it a section.',
+  'plus-line-in-item': "A line of only + right below a list item's first line is text of the item in Markdown, but Linear reads it as an empty list item and the text after it moves. Run fix to write it as + followed by a no-break space, which Linear keeps as text, or remove the line.",
+  'tab-indentation': 'A tab in the indentation of a list item, a quote or a code block, or after a list, heading or quote marker, is laid out differently by Linear, and text moves or is lost. Run fix to write the indentation with spaces, or replace the tabs with spaces yourself.',
   'ordered-task-list': 'An ordered task list becomes a bullet task list. Use a bullet task list, or an ordered list without checkboxes.',
-  'image-not-in-repository': 'An image must be a relative path to a file of the repository, not a URL, an absolute path or a path outside it. Add the file to the repository and link it by its relative path.',
+  'image-not-in-repository': 'An image must be a relative path to a file of the repository, not a URL, an absolute path or a path outside it. Add the file to the repository and link it by its relative path, or run fix to write an HTTP(S) image as a link.',
   'image-file-missing': 'An image must name a file that exists in the repository, not a folder or a Markdown document.',
   'upload-file-refused': 'A file named as the sync names a captured upload fails the upload check: documents that link it are blocked when they change in Linear.',
   'document-in-assets-folder': 'A Markdown document cannot be inside a folder named assets, which holds the files documents embed.',
 } as const;
 
 export type LintRule = keyof typeof LINT_RULES;
+
+/**
+ * Warnings: text that may read differently from what its author meant, which
+ * formatting and sync keep as it is. `lint` and `fix` print them, but they
+ * never fail a command, a hook or CI, and never leave a file out.
+ */
+export const LINT_WARNINGS = {
+  'image-made-link': 'fix wrote an image from a URL as a link to it, or as the text of the link around it: Linear shows no image. To show the image, add the file to the repository and link it by its relative path.',
+  'link-text-from-url': 'fix wrote the URL of a link without text as its text: Linear drops a link without text. To show other words, replace the text.',
+  'list-number-as-text': "A line in a list item starts with a number that Markdown reads as text of the item, though it looks like a nested numbered list: a nested list numbered other than 1 cannot follow the item's text, and a list indented four or more columns past the item's text is part of it. To make it a list, renumber its first item to 1., move it one level up, or remove a doubled number such as 14. 13. in the line above, and remove the backslash fix writes after each of its numbers (2\\.).",
+} as const;
+
+export type LintWarningRule = keyof typeof LINT_WARNINGS;
+
+export interface Warning {
+  readonly file: string;
+  /** 1-based line in the file, front matter included. */
+  readonly line: number;
+  readonly rule: LintWarningRule;
+  readonly message: string;
+}
 
 /**
  * Rules whose construct `fix` rewrites into Linear's form without changing
@@ -55,8 +81,17 @@ export type LintRule = keyof typeof LINT_RULES;
  * break, which Linear keeps; where that would change the document (a break
  * in a heading, which `fix` writes on one line, or a line that reads
  * differently without its backslash), `fixText` leaves the text as it is.
+ * A `>` that starts a table body cell gets a backslash, the form Linear
+ * writes for that text; lint's FIX_ONLY_RULES lets the sync send such a
+ * file as it is, since Linear's own export can hold it. A link without
+ * text gets its URL as the text; one without a URL stays with its author.
+ * A line of plus signs with text right after them that Linear would read
+ * as a section's title gets a backslash (`\+++Plan`); the sync leaves it
+ * out until then. A lone `+` right below an item's first line gets a
+ * no-break space after it, and the indentation a tab takes in the Markdown
+ * structure is written with spaces; the sync leaves those out until then too.
  */
-export const FIXED_RULES: ReadonlySet<LintRule> = new Set<LintRule>(['hard-break-backslash']);
+export const FIXED_RULES: ReadonlySet<LintRule> = new Set<LintRule>(['hard-break-backslash', 'link-without-text', 'plus-line-in-item', 'section-marker-text', 'tab-indentation', 'table-quote-cell']);
 
 /**
  * Rules about where an image's file is, not about what Linear loses. The

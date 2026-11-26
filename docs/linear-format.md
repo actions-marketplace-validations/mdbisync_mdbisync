@@ -67,6 +67,9 @@ notes/plan.md:12: footnote: Footnotes are dropped.
 notes/setup.md: not in Linear's form; run fix
 ```
 
+Both commands also print [warnings](#lint-warnings), as
+`file:line: warning: rule: message`. A warning never changes the exit code.
+
 Control characters in a printed file name, line breaks and tabs included, and
 backslashes are written as `\uXXXX` escapes, so every finding stays on one
 line. When a file
@@ -189,12 +192,13 @@ Blocks:
   Linear keeps such text but can return `4\) pear` and a lone `\+` without
   their escapes. The sync restores an escape where the text would read as
   a block. A lone `+` on a paragraph continuation line stays plain.
-  As the second line of a list item's text, with more of that paragraph
-  after it, Linear reads a lone `+` as an empty item (four or more columns
-  past the item's text, as code) and drops the backslash of `\+`: there
+  As the second line of a list item's text, also as its last line, Linear
+  reads a lone `+` as an empty item (four or more columns past the item's
+  text, as code) and drops the backslash of `\+`: there
   `fix` writes `+` and a no-break space at the column of the item's text,
   which Linear keeps as text. Under a quote, and on later lines, the `+`
-  stays as it is.
+  stays as it is. Until then `lint` reports the plain `+` as
+  [`plus-line-in-item`](#plus-line-in-item).
 - A line that opens with three or more `>` signs is a collapsible section
   in Linear, not a nested quote, and `fix` writes it as Linear does: the
   rest of the line becomes the title of a `+++` line, and the section holds
@@ -213,15 +217,22 @@ Blocks:
   line without a title that would open a section inside another one, or a
   `>>>` line without a title after a `+++` line closed its sections, is
   left to you (`section-opener`).
-- A run of more than three `+` signs is a section marker too, and `fix`
+- A section marker is a run of `+` signs followed by a space, a tab or
+  the line's end; Linear writes a section's title line as `+++ Title`.
+  A run of more than three signs is a section marker too, and `fix`
   writes it with three: `++++ Tip` and a closing `++++` become `+++ Tip`
   and `+++`. A closing marker pairs only with an opener of its own width,
   so a list item, quote or document that mixes widths is left to you.
-  Where such a run starts a list item or quote whose text goes on in a
-  line below without its indentation (`* ++++Tip` / `lazy words`), Linear
-  keeps it as text; `fix` escapes it (`* \++++Tip` / `  lazy words`).
-  Linear writes that text back without the backslash, and the sync puts
-  the backslash back, since a new document would read it as a section.
+- Signs with text right after them (`+++Plan`, `++++Tip`) are text.
+  Linear writes such text back without a backslash, but reads it as a
+  section's title when more of its list item, quote or document follows,
+  also on the next line. There `fix` escapes it (`1. \+++Plan` with a
+  nested list below it), the
+  [`section-marker-text`](#section-marker-text) rule. As the last line of
+  a paragraph above it, Linear splits it off as a paragraph of its own, so
+  `fix` escapes it there too. As the only line of the last paragraph of its
+  container (`1. +++Plan` followed by the next item) it stays as you wrote
+  it: Linear keeps it as text.
 - A bare `+++` opens an untitled section when it has a body or a closing
   marker and there is no section open in the same document, list item or
   quote. `fix` writes that opener with one trailing space, as Linear does.
@@ -230,7 +241,7 @@ Blocks:
   stays plain text.
 - A section marker that starts a list item or quote opens a section when
   more of the item or quote follows it, also on the next line: Linear reads
-  `1. +++Plan` followed by `   first step` as a section titled `Plan`. In a
+  `1. +++ Plan` followed by `   first step` as a section titled `Plan`. In a
   quote `fix` writes it as Linear does. In a list item it is
   [`block-first-in-list-item`](#block-first-in-list-item). A marker that is
   the item's only text stays text.
@@ -268,7 +279,9 @@ Blocks:
   [`table-hash-cell`](#table-hash-cell) rule). A `-` that starts a cell's
   text gets a backslash (`| \-1.5 |`), and an escaped `+` that starts a
   cell loses it unless a space, a tab, a backslash, a character reference,
-  another `+` or the cell's end follows (`| +1 |`), as Linear writes them. In a header cell, a
+  another `+` or the cell's end follows (`| +1 |`), as Linear writes them. A
+  `>` that starts a body cell's text gets a backslash (`| \> Draft |`), the
+  [`table-quote-cell`](#table-quote-cell) rule. In a header cell, a
   starting `>` gets a backslash too, and so do a `+` that a space and text
   follow and a number's dot that whitespace and text follow
   (`| \+ Plan | 1\. Step |`). A line break tag in a cell
@@ -424,9 +437,17 @@ Inline text:
   text. At the inner edge of an emphasis mark it moves outside the mark.
   Where the tab would change how Markdown reads the text, `fix` leaves
   the file as written and reports [`tab-reference-layout`](#tab-reference-layout).
-- Emoji shortcodes Linear knows become emoji: `Done :tada:` becomes
-  `Done 🎉`. An escaped reference or shortcode (`\&amp;`, `\:tada:`) stays
-  as written.
+- Emoji shortcodes Linear knows become emoji, also in link text: `Done
+  :tada:` becomes `Done 🎉`, and `:spiral_calendar_pad:` becomes `🗓️`.
+  Linear knows Slack's names for emoji up to Unicode 14, one name per
+  emoji. Other shortcodes stay text, in Linear and in the file: GitHub-only
+  names such as `:albania:`, second names such as `:thumbsup:` (use
+  `:+1:`), and newer emoji such as `:shaking_face:`. An escaped reference
+  or shortcode (`\&amp;`, `\:tada:`) stays as written. Linear can
+  read back an emoji added in its editor as the shortcode
+  (`:spiral_calendar_pad:` for `🗓️`). The sync reads such a shortcode as
+  its emoji: a file with the emoji is no change, and a pull writes the
+  emoji.
 - A backslash before anything but ASCII punctuation (a letter, a digit, a
   space) is a literal backslash, and it is doubled, as Linear doubles it:
   `$\pi$` becomes `$\\pi$`, and `C:\ 2026` becomes `C:\\ 2026`. So is a
@@ -478,7 +499,10 @@ Inline text:
   ``a ` b`` becomes ``a \` b``.
 - A continuation line of a paragraph keeps its own indentation, as Linear
   does: the quote's `>` or the item's indent is written in place of the
-  source's, and spaces or tabs past it stay. A tab that the item's indent
+  source's, and spaces or tabs past it stay. A tab in the prefix itself,
+  after a list, heading or quote marker, or in an indented code block's
+  indentation is written as spaces; until then `lint` reports it as
+  [`tab-indentation`](#tab-indentation). A tab that the item's indent
   covers only in part leaves its other columns as spaces: under `* item`, a
   line indented with one tab is written with four spaces. Later tabs stay
   tabs: under `1. Plan`, two tabs before `2. step` become four spaces and a
@@ -529,9 +553,14 @@ names a missing file, until the document or its image is fixed: see
 
 Each rule is a construct Linear would lose or alter, and its message says
 what to do. `fix` never rewrites a file with a finding, so nothing is lost
-silently; change the file yourself. The one exception is
-[`hard-break-backslash`](#hard-break-backslash), which `fix` writes in a
-form Linear keeps where it can.
+silently; change the file yourself. The exceptions are
+[`hard-break-backslash`](#hard-break-backslash),
+[`plus-line-in-item`](#plus-line-in-item),
+[`section-marker-text`](#section-marker-text),
+[`tab-indentation`](#tab-indentation) and
+[`table-quote-cell`](#table-quote-cell), which `fix` writes in a form
+Linear keeps where it can, and HTTP(S) images, which `fix` writes as links
+([`image-not-in-repository`](#image-not-in-repository)).
 
 ### `footnote`
 
@@ -605,6 +634,22 @@ the same way, and the sync keeps such a document.
 | + fee | 3) |
 ```
 
+### `table-quote-cell`
+
+A table body cell starting with > becomes a quote, and Linear drops the >;
+a cell starting with >> can take the rows and text below it into the cell.
+Run fix to write it as \>, or put a backslash before the > yourself.
+`| > Draft |` comes back `| Draft |`. A header cell, an escaped `\>`, a
+`&gt;` and a `>` later in the cell keep their text. The sync sends such a
+file as it is: Linear's own export starts a cell with `>` for an empty
+quote inside a quote.
+
+```markdown
+| Item | Note |
+| -- | -- |
+| > Draft | Ready |
+```
+
 ### `image-in-link`
 
 The link around an image is dropped. A badge or a clickable picture loses
@@ -615,9 +660,9 @@ its link.
 ```
 
 Instead, put the image and the link side by side or on separate lines.
-A badge served from another site is an image outside the repository, which
-[`image-not-in-repository`](#image-not-in-repository) reports as well: link
-to the page instead.
+A badge served from another site is an image outside the repository:
+`fix` writes it as text of the outer link
+([`image-not-in-repository`](#image-not-in-repository)).
 
 ### `content-too-long`
 
@@ -730,6 +775,22 @@ links are removed together with their text.
 ```markdown
 [Unsupported](javascript:alert%281%29)
 ```
+
+### `link-without-text`
+
+Linear drops a link without text, and its URL with it. Run fix to write the
+URL as the link text, or write the text yourself; a link with neither text
+nor URL needs text or removal. This holds for an inline link and a
+reference link.
+
+```markdown
+See [](https://example.com/guide).
+```
+
+`fix` writes this as `See [https://example.com/guide](<https://example.com/guide>).`
+and prints the [`link-text-from-url`](#link-text-from-url) warning. An
+image without alt text (`![](images/logo.png)`) is not a link and is not
+reported.
 
 ### `link-title`
 
@@ -1007,6 +1068,48 @@ file to you. A list that starts an item (`* * a`, `1. 2.`) is no finding:
    +++
 ```
 
+### `section-marker-text`
+
+A line that starts with +++ and text right after it (+++Plan) is text, but
+Linear opens a collapsible section from it when more of its list item,
+quote or document follows. Run fix to write it as \+++Plan, or put a space
+after +++ to make it a section. Linear writes the text back without the
+backslash; the sync reads it as text and writes it as `fix` does.
+
+```markdown
+1. Week
+   1. +++Plan
+      1. First step
+```
+
+### `plus-line-in-item`
+
+A line of only + right below a list item's first line is text of the item
+in Markdown, but Linear reads it as an empty list item and the text after
+it moves. Run fix to write it as + followed by a no-break space, which
+Linear keeps as text, or remove the line. The sync leaves the document out
+until then.
+
+```markdown
+- Water the beds
+  +
+  in the morning
+```
+
+### `tab-indentation`
+
+A tab in the indentation of a list item, a quote or a code block, or after
+a list, heading or quote marker, is laid out differently by Linear, and
+text moves or is lost. Run fix to write the indentation with spaces, or
+replace the tabs with spaces yourself. A tab in the text of a line past
+its indentation, or in a fenced code block's code, stays and is not
+reported. The sync leaves the document out until then.
+
+```markdown
+- Spring
+	- Sow the peas
+```
+
 ### `ordered-task-list`
 
 An ordered task list becomes a bullet task list. Use a bullet task list, or
@@ -1023,7 +1126,8 @@ counts.
 
 An image must be a relative path to a file of the repository, not a URL,
 an absolute path or a path outside it. Add the file to the repository and
-link it by its relative path. The sync uploads the files a
+link it by its relative path, or run fix to write an HTTP(S) image as a
+link. The sync uploads the files a
 document's images name; an image anywhere else would depend on the reader's
 network and on what Linear does with it. Linear has kept such an image,
 copied it to an upload of its own, and, most recently, kept only its alt
@@ -1039,6 +1143,14 @@ repository. Plain links to URLs are not affected.
 Add the file in the same pull request, for example as
 `![Revenue chart](images/revenue.png)`. A file stored with Git LFS counts
 like any other.
+
+`fix` writes an `http:` or `https:` image as a link to its URL, as a pull
+repairs it, and prints the [`image-made-link`](#image-made-link) warning:
+`[Revenue chart](<https://example.com/charts/revenue.png>)`. An empty alt
+text uses the URL as the label, and an image inside a link keeps the outer
+link. An image with a title ([`image-title`](#image-title)), `data:`
+images, absolute paths and paths outside the repository stay findings for
+you to fix.
 
 ### `image-file-missing`
 
@@ -1095,6 +1207,88 @@ guides/assets/notes.md
 
 Instead, move the document out of the `assets` folder.
 
+## Lint warnings
+
+A warning marks text that may not read as its author meant. `lint` and
+`fix` print it; a warning never fails a command, a hook or CI, and never
+leaves a file out of the sync.
+
+### `image-made-link`
+
+fix wrote an image from a URL as a link to it, or as the text of the link
+around it: Linear shows no image. To show the image, add the file to the
+repository and link it by its relative path. `fix` prints it for each image
+it rewrote, with the image's line in the file before the fix
+([`image-not-in-repository`](#image-not-in-repository)).
+
+```markdown
+Intro.
+
+![Revenue chart](https://example.com/charts/revenue.png)
+```
+
+Line 3 is reported. An image of a repository file is not:
+
+```markdown
+![Revenue chart](images/revenue.png)
+```
+
+### `link-text-from-url`
+
+fix wrote the URL of a link without text as its text: Linear drops a link
+without text. To show other words, replace the text. `fix` prints it for
+each line with such a link, with the line in the file before the fix
+([`link-without-text`](#link-without-text)).
+
+```markdown
+Intro.
+
+See [](https://example.com/guide).
+```
+
+Line 3 is reported. A link with text is not:
+
+```markdown
+See [the guide](https://example.com/guide).
+```
+
+### `list-number-as-text`
+
+A line in a list item starts with a number that Markdown reads as text of
+the item, though it looks like a nested numbered list: a nested list
+numbered other than 1 cannot follow the item's text, and a list indented
+four or more columns past the item's text is part of it. To make it a
+list, renumber its first item to 1., move it one level up, or remove a
+doubled number such as 14. 13. in the line above, and remove the backslash
+fix writes after each of its numbers (2\.).
+
+`fix` writes such a number escaped (`2\.`), so it stays text in Linear; the
+warning finds it in either form. It covers numbers of up to three digits
+followed by `.` or `)`, and a tab counts to the next multiple of four
+columns. A numbered line right below another one at the same indentation
+belongs to the same list and is not reported on its own. Inline code and
+text in a quote are not checked.
+
+```markdown
+1. Plan
+   2. Call the team
+2. Review
+       1\. Read the notes
+3. 4. Ship
+      2\. Pack
+```
+
+Lines 2, 4 and 6 are reported. Written as lists:
+
+```text
+1. Plan
+   1. Call the team
+2. Review
+   1. Read the notes
+3. Ship
+   1. Pack
+```
+
 ## Install the hook
 
 The repository publishes two pre-commit hooks:
@@ -1105,7 +1299,7 @@ The repository publishes two pre-commit hooks:
 | `linear-format-check` | `mdbisync lint` | reports it without writing |
 
 Both report lint findings with file, line and rule and leave those files
-unchanged. Synchronization requires `linear-format`; `linear-format-check`
+unchanged. They also print [warnings](#lint-warnings), which pass. Synchronization requires `linear-format`; `linear-format-check`
 can follow it as an extra check. The hooks run one formatter process at a
 time, and see the files pre-commit selects: use `--all-files` to check the
 whole repository, existing files included.

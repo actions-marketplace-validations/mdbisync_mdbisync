@@ -72,6 +72,12 @@ rules:
     title: "A URL inside raw HTML is turned into a Markdown link."
   - id: block-first-in-list-item
     title: "A list item that starts with a heading, code, a quote, a collapsible section or another block is written in a form Markdown reads as an empty item."
+  - id: section-marker-text
+    title: "A line that starts with +++ and text right after it is text, but Linear opens a collapsible section from it when more of its list item, quote or document follows."
+  - id: plus-line-in-item
+    title: "A line of only + right below a list item's first line is text of the item in Markdown, but Linear reads it as an empty list item."
+  - id: tab-indentation
+    title: "A tab in the indentation of a list item, a quote or a code block, or after a list, heading or quote marker, is laid out differently by Linear."
   - id: ordered-task-list
     title: "An ordered task list becomes a bullet task list."
   - id: table-hash-cell
@@ -82,6 +88,8 @@ rules:
     title: "An image must name a file that exists in the repository, not a folder or a Markdown document."
   - id: table-list-cell
     title: "A table body cell starting with -, + or * and a space, or with a number and ), becomes a list, which Linear writes with * or a number and a dot. Put a backslash before the -, + or *, or reword the cell."
+  - id: table-quote-cell
+    title: "A table body cell starting with > becomes a quote, and Linear drops the >; a cell starting with >> can take the rows and text below it into the cell."
   - id: setext-heading-lines
     title: "Linear keeps only the first line of a heading underlined with = or - as the heading; the lines after it become a paragraph. Put the heading text on one line."
   - id: table-header-pipe
@@ -137,6 +145,10 @@ known_constructs:
     class: fixable
   - construct: table-cell-start-dash
     class: fixable
+  - construct: table-quote-cell
+    class: lint-error
+  - construct: table-quote-cell-escaped
+    class: unchanged
   - construct: list-kinds
     class: fixable
   - construct: list-first-in-item
@@ -3571,12 +3583,12 @@ fixtures:
     group: construct-singles
     construct: item-section-run
     class: lint-error
-    rule: block-first-in-list-item
+    rule: section-marker-text
     line: 11
     basis: known
     canary: kx-84ea78d6
     corpus: false
-    note: "+++ starting a list item: text when it is the item's only line, a section when a closing marker follows in the item"
+    note: "+++ starting a list item: text when it is the item's only line; +++Plan with more of the item below it is text Linear would read as a section, which fix escapes (section-marker-text)"
   - file: "construct-singles/item-section-run-more.md"
     group: construct-singles
     construct: item-section-run
@@ -3592,7 +3604,7 @@ fixtures:
     construct: item-section-run
     class: lint-error
     rule: block-first-in-list-item
-    line: 4
+    line: 9
     basis: known
     canary: kx-c0acae56
     corpus: false
@@ -3609,18 +3621,38 @@ fixtures:
     group: construct-singles
     construct: item-section-run
     class: lint-error
-    rule: block-first-in-list-item
+    rule: section-marker-text
     line: 10
     basis: known
     canary: kx-28e5300f
     corpus: false
-    note: "a +++ item followed by a +++ line after the list stays text; a titled marker with an indented line below it opens a section"
+    note: "a +++ item followed by a +++ line after the list stays text; +++Topic with an indented line below it is text Linear would read as a section, which fix escapes (section-marker-text)"
+  - file: "construct-singles/item-section-run-escaped.md"
+    group: construct-singles
+    construct: item-section-run-escaped
+    class: fixable
+    basis: assumed
+    canary: kx-f6eb1150
+    git_form: captured
+    corpus: false
+    probe_pending: true
+    note: "fix's form of item-section-run: an escaped +++Plan with more of the item below it stays text; Linear writes it back without the backslash, and the sync captures fix's form"
+  - file: "construct-singles/item-section-run-outside-escaped.md"
+    group: construct-singles
+    construct: item-section-run-escaped
+    class: fixable
+    basis: assumed
+    canary: kx-f6e0b909
+    git_form: captured
+    corpus: false
+    probe_pending: true
+    note: "fix's form of item-section-run-outside: an escaped +++Topic with an indented line below it stays text; Linear writes it back without the backslash, and the sync captures fix's form"
   - file: "construct-singles/item-section-run-tight.md"
     group: construct-singles
     construct: item-section-run
     class: lint-error
     rule: block-first-in-list-item
-    line: 3
+    line: 6
     basis: known
     canary: kx-65eb6a08
     corpus: false
@@ -3677,6 +3709,24 @@ fixtures:
     canary: kx-9bbd184a
     corpus: false
     note: "Linear escapes a dash that starts a header or body cell's text, a +, > or number dot before a space and text in a header cell, and drops the escape of a plus sign at a cell's start that opens no list"
+  - file: "tables/table-quote-cell.md"
+    group: tables
+    construct: table-quote-cell
+    class: lint-error
+    rule: table-quote-cell
+    line: 5
+    basis: known
+    canary: kx-84eba4b0
+    corpus: false
+    note: "Linear holds a body cell starting with > as a quote and writes it without the >; a cell starting with >> takes the text below it into the cell"
+  - file: "tables/table-quote-cell-escaped.md"
+    group: tables
+    construct: table-quote-cell-escaped
+    class: unchanged
+    basis: known
+    canary: kx-e549ef24
+    corpus: false
+    note: "fix's form of table-quote-cell: an escaped > at a body cell's start stays text"
   - file: "list-items/list-kinds-in-item.md"
     group: list-items
     construct: list-kinds
@@ -3775,7 +3825,7 @@ fixtures:
     construct: item-section-long-run
     class: lint-error
     rule: block-first-in-list-item
-    line: 1
+    line: 19
     basis: known
     canary: kx-750c916e
     corpus: false
@@ -3970,3 +4020,25 @@ fixtures:
     canary: kx-575a16ec
     corpus: false
     note: "Linear numbers the list on past nine digits, which Markdown reads as text of the item above"
+  - file: "lint-errors/plus-line-in-item.md"
+    group: lint-errors
+    construct: plain-plus-line-in-item
+    class: lint-error
+    basis: assumed
+    rule: plus-line-in-item
+    line: 4
+    canary: kx-5e1a0130
+    corpus: false
+    probe_pending: true
+    note: "a lone + right below an item's first line is item text in Markdown and an empty item in Linear; fix writes + and a no-break space, which Linear keeps as text"
+  - file: "lint-errors/tab-indentation.md"
+    group: lint-errors
+    construct: tab-indentation
+    class: lint-error
+    basis: assumed
+    rule: tab-indentation
+    line: 4
+    canary: kx-5e1a0131
+    corpus: false
+    probe_pending: true
+    note: "tabs in a nested item's prefix, in an item's continuation and after a quote marker; fix writes the indentation with spaces"

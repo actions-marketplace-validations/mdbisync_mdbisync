@@ -13,7 +13,9 @@ import { PullRequestError, closePullRequestAtHead, ensurePullRequest, findOpenPu
 import { type RunContext } from '../run/preflight.ts';
 import { checkpoint } from '../test-hooks.ts';
 import { GitOutputLimitError } from '../state/git.ts';
-import { branchRef, commitIds, commitTree, isAncestor, listTree, pushAtomic, readIds, readReservedIds, readSupersededIds, readWrittenHashes, stateRef, suspendedBranch, type CommitIdentity, type Git, type IdMap, type Oid, type PushedRecord, type StateConfig, type StateSnapshot } from '../state/index.ts';
+import { VERSION } from '../version.ts';
+import { listPaths, readBlobs } from '../state/objects.ts';
+import { branchRef, commitIds, commitTree, isAncestor, listTree, pushAtomic, readIds, readReservedIds, readSupersededIds, readWrittenHashes, showCommit, stateRef, suspendedBranch, type CommitIdentity, type Git, type IdMap, type Oid, type PushedRecord, type StateConfig, type StateSnapshot } from '../state/index.ts';
 import { knownIdLookup, mergeWithMarkers, takePaths, treeCommit } from './merge.ts';
 import type { HoldFailure } from './hold.ts';
 import type { CheckFailure, ExpectedCheck } from '../pull-request/index.ts';
@@ -76,9 +78,15 @@ export interface LaneOptions {
   mergeWithoutChecks?: boolean | undefined;
   /** Answers whether the hooks pass a stored repair's text. */
   security: RepairGate;
+  /**
+   * Suspended paths this run's capture read again for its version and found to be what the tracked branch holds. Such a
+   * path converges though this intake does not change it: an older version may have recorded the same reading already,
+   * while the lane still holds what it merged then.
+   */
+  rereadAsTracked?: readonly string[] | undefined;
 }
 
-const treeOf = (git: Git, commit: Oid) => git.text(['rev-parse', `${commit}^{tree}`]);
+const treeOf = (git: Git, commit: Oid) => git.revParse(`${commit}^{tree}`);
 
 export class LaneMoved extends Error {}
 export class LaneConflict extends Error {
@@ -110,6 +118,20 @@ async function mergeTree(git: Git, linear: Oid, other: Oid, base: Oid | undefine
   const merged = await mergeWithMarkers(git, linear, other, ids, knownIdLookup(git, idsTip, ids), base);
   if (merged.resolved.unresolved.length > 0) throw new LaneConflict('A suspended file needs a manual merge', merged.resolved.unresolved);
   return merged.resolved.tree;
+}
+
+/**
+ * The paths whose reading this intake changed (from `base`) to the tracked branch's text, and those of `reread` whose
+ * reading is that text: the same Markdown body, whatever front matter or final newlines either side writes.
+ */
+async function convergedPaths(git: Git, intake: Oid, base: Oid, tracked: Oid, paths: ReadonlySet<string>, reread: ReadonlySet<string>): Promise<Set<string>> {
+  if (paths.size === 0) return new Set();
+  const list = [...paths];
+  const [read, before, held] = await Promise.all([intake, base, tracked].map(async (commit) => new Map((await listPaths(git, commit, list)).filter((entry) => entry.type === 'blob').map((entry) => [entry.path, entry.oid]))));
+  const candidates = list.filter((path) => read!.has(path) && held!.has(path) && (read!.get(path) !== before!.get(path) || reread.has(path)));
+  const blobs = await readBlobs(git, [...new Set(candidates.flatMap((path) => [read!.get(path)!, held!.get(path)!]))]);
+  const body = (oid: Oid) => splitFile(blobs.get(oid)!.toString('utf8')).body.replace(/\n+$/, '');
+  return new Set(candidates.filter((path) => body(read!.get(path)!) === body(held!.get(path)!)));
 }
 
 async function changedPaths(git: Git, before: Oid, after: Oid): Promise<string[]> {
@@ -217,6 +239,8 @@ async function addEpisodes(context: RunContext, options: LaneOptions, ids: IdMap
   }
   for (const [path, entry] of ids) if (paths.has(path) && entry.suspended === undefined) {
     entry.suspended = { noticeId: randomUUID(), paths: [path], checks: [...checks], ...(timedOut.length > 0 ? { timedOut: [...timedOut] } : {}) };
+    // The batch was read by the running version: its next run has nothing to read again.
+    entry.capturedWith = VERSION;
     delete entry.releaseBase;
     delete entry.releasePaths;
   }
@@ -231,7 +255,7 @@ export async function maintainSuspended(context: RunContext, options: LaneOption
   const paths = suspendedPaths(ids);
   // Finish a deferred close (or a crash after the atomic push) before release
   // can replace the set-aside head. The normal lane must preserve it too.
-  if (context.fetched.sync !== null && await git.text(['show', '-s', '--format=%s', context.fetched.sync]) === SET_ASIDE_MESSAGE) {
+  if (context.fetched.sync !== null && await showCommit(git, '%s', context.fetched.sync) === SET_ASIDE_MESSAGE) {
     const pending: SuspendedResult = { paths: [...paths].sort(), checks: [], normalClosePending: true };
     try {
       const normal = await findOpenPullRequest(options.github, options.config.syncBranch, options.config.trackedBranch);
@@ -278,7 +302,8 @@ export async function maintainSuspended(context: RunContext, options: LaneOption
     for (const path of await changedPaths(git, tracked, head)) paths.add(path);
     await addEpisodes(context, options, ids, paths, []);
     // A repair the hooks pass after the lane took in its observation changes the view, not the Linear ref.
-    if (bases.linear !== linear || await treeOf(git, intake) !== await treeOf(git, bases.view ?? bases.linear)) {
+    const reread = new Set((options.rereadAsTracked ?? []).filter((path) => paths.has(path)));
+    if (bases.linear !== linear || reread.size > 0 || await treeOf(git, intake) !== await treeOf(git, bases.view ?? bases.linear)) {
       const hold = await includeCapturedAssets(git, intake, ids, paths);
       if (hold !== undefined) return hold;
       // The intake never carries paths outside this lane. Mask them before
@@ -287,8 +312,19 @@ export async function maintainSuspended(context: RunContext, options: LaneOption
       const base = await treeCommit(git, await takePaths(git, head, bases.view ?? bases.linear, paths), bases.linear);
       const tree = await mergeTree(git, input, head, base, ids, options.state.ids);
       const linearChanged = await takePaths(git, head, linear, paths) !== await takePaths(git, head, bases.linear, paths);
-      const selected = await takePaths(git, head, tree, paths);
-      if (linearChanged || selected !== await git.text(['rev-parse', `${head}^{tree}`])) {
+      // A document this intake now reads as what the tracked branch holds is held no more: the lane takes the tracked
+      // file, conflict notices of an older reading included, so it no longer differs there. Only where the sync alone
+      // wrote the lane: a commit someone else pushed there since the sync's last push keeps its paths as merged.
+      const pushed = lastPushed(context, options, ids);
+      const outside = previous === null || pushed === undefined ? undefined : new Set(pushed === previous ? [] : await changedPaths(git, pushed, previous));
+      const converged = outside === undefined ? new Set<string>()
+        : await convergedPaths(git, intake, bases.view ?? bases.linear, tracked, new Set([...paths].filter((path) => !outside.has(path))), reread);
+      const selected = await takePaths(git, await takePaths(git, head, tree, paths), tracked, converged);
+      // The reading is the running version's now: the version is noted with this lane's push, never before it. Also where
+      // the lane does not know its last push and keeps the path as merged: a later push of its own would hide whose
+      // edit the path holds.
+      for (const path of reread) { const entry = ids.get(path); if (entry !== undefined) entry.capturedWith = VERSION; }
+      if (linearChanged || selected !== await git.revParse(`${head}^{tree}`)) {
         head = await commit(context, options, selected, intake === linear ? [head] : [head, intake], LINEAR_INTAKE_MESSAGE + note(tracked, linear, intake));
         bases.linear = linear;
         bases.view = intake;
@@ -309,7 +345,7 @@ export async function maintainSuspended(context: RunContext, options: LaneOption
     if (again !== null) {
       carried = again.carried;
       const trailer = again.from === undefined ? '' : checksAgainTrailer(again.from);
-      head = await commit(context, options, await git.text(['rev-parse', `${unchanged}^{tree}`]), [unchanged], SUSPENDED_CHECKS_AGAIN_MESSAGE + note(bases.tracked, bases.linear, bases.view) + trailer);
+      head = await commit(context, options, await git.revParse(`${unchanged}^{tree}`), [unchanged], SUSPENDED_CHECKS_AGAIN_MESSAGE + note(bases.tracked, bases.linear, bases.view) + trailer);
     }
   }
   const anchor = [...ids.values()].find((entry) => entry.suspended !== undefined);
@@ -397,6 +433,7 @@ async function release(context: RunContext, options: LaneOptions, ids: IdMap, pa
   let first = true;
   for (const [path, entry] of ids) if (entry.suspended !== undefined) {
     delete entry.suspended;
+    delete entry.capturedWith;
     entry.releaseBase = linearBase;
     entry.releasePaths = first ? [...paths].sort() : [path];
     first = false;
@@ -450,7 +487,7 @@ export async function suspendBatch(context: RunContext, options: LaneOptions, fa
   await addEpisodes(context, options, ids, paths, checks, timedOut);
   const anchor = [...ids.values()].find((entry) => entry.suspended !== undefined);
   if (anchor?.suspended !== undefined) anchor.suspended.paths = [...paths].sort();
-  const normal = await commit(context, options, await git.text(['rev-parse', `${tracked}^{tree}`]), [failed, tracked], SET_ASIDE_MESSAGE);
+  const normal = await commit(context, options, await git.revParse(`${tracked}^{tree}`), [failed, tracked], SET_ASIDE_MESSAGE);
   // Everything this suspension publishes is decided and nothing of it is published yet: a crash here leaves no trace.
   await checkpoint('before-suspension-push');
   await push(context, options, ids, head, previous, { expected: failed, next: normal });

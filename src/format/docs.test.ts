@@ -7,7 +7,9 @@ import { readFileSync } from 'node:fs';
 import { describe, it } from 'node:test';
 import { fixText } from './fix.ts';
 import { duplicateTitles, lintText } from './lint.ts';
-import { LINT_RULES, type LintRule } from './rules.ts';
+import { listTextWarnings } from './list-text.ts';
+import { webImageLinks } from '../sync/image-links.ts';
+import { LINT_RULES, LINT_WARNINGS, type LintRule, type LintWarningRule } from './rules.ts';
 
 const docs = readFileSync(new URL('../../docs/linear-format.md', import.meta.url), 'utf8');
 
@@ -51,6 +53,26 @@ describe('format docs', () => {
         const rules = lintText('example.md', body).map((finding) => finding.rule);
         assert.ok(rules.includes(rule as LintRule), `${rule}: its example is reported as ${JSON.stringify(rules)}`);
       }
+    }
+  });
+
+  it('list each warning with its message, a Markdown example it reports and a form it does not', () => {
+    const parts = section('Lint warnings').split(/\n### `([^`]+)`\n/);
+    const sections = new Map<string, string>();
+    for (let index = 1; index < parts.length; index += 2) sections.set(parts[index]!, parts[index + 1]!);
+    assert.deepEqual([...sections.keys()], Object.keys(LINT_WARNINGS));
+    for (const [rule, text] of sections) {
+      assert.ok(text.replace(/\s+/g, ' ').includes(LINT_WARNINGS[rule as LintWarningRule]), `${rule}: the docs do not give its message`);
+      const [example, listed] = fences(text);
+      assert.equal(example?.info, 'markdown');
+      const named = /\bLines? ([\d, and]+) (?:is|are) reported\./.exec(text);
+      assert.ok(named !== null, `${rule}: the docs do not say which lines are reported`);
+      const documented = named[1]!.split(/,? and |, /).map(Number);
+      const lines = (body: string): number[] => rule === 'image-made-link' ? webImageLinks(body)?.lines ?? []
+        : rule === 'link-text-from-url' ? lintText('example.md', body).filter((finding) => finding.rule === 'link-without-text').map((finding) => finding.line)
+        : listTextWarnings('example.md', body).map((warning) => warning.line);
+      assert.deepEqual(lines(example.body), documented);
+      assert.deepEqual(lines(listed!.body), []);
     }
   });
 

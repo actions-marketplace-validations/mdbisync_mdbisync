@@ -7,13 +7,15 @@ import type { Definition, ImageReference, LinkReference, Nodes, PhrasingContent,
 import { CONTENT_LIMIT, LINT_RULES, type Finding, type LintRule } from './rules.ts';
 import { ASSETS_FOLDER } from '../sync/upload-type.ts';
 import { allowedLink, bracketedLabel, codeSpanText, linearDropsCodeSpaces, listKind, listParts, MAX_LIST_NUMBER, nestsMarkerText, opensWithText, MARKDOWN_MAX_NODES, MarkdownLimitError, end, imageDestination, line, lineCount, linkDestination, parse, resolveTarget, splitFile, start, visit, endingRow } from './markdown.ts';
-import { sectionsFirstInItem, unwritableSectionLine } from './sections.ts';
+import { plusTextAsText, plusTextLines, sectionsFirstInItem, unwritableSectionLine } from './sections.ts';
+import { plusLines } from './marker-lines.ts';
+import { structuralTabLines } from './tab-indentation.ts';
 import { tabReferences } from './tab-reference.ts';
 
 const GIT_MARKER = /^ {0,3}(?:<{7}|>{7})(?: |$)/;
 const QUOTE_PREFIX = /^ {0,3}> ?/;
 const ATX_HEADING = /^#{1,6}(?:[ \t]|$)/;
-const FIX_ONLY_RULES: ReadonlySet<LintRule> = new Set<LintRule>(['code-span-padding', 'hard-break-in-heading', 'list-after-item-text', 'list-number-too-long', 'setext-heading-lines', 'table-header-pipe', 'table-list-cell', 'tab-reference-layout', 'space-reference-edge', 'unplaced-link', 'number-paragraph']);
+const FIX_ONLY_RULES: ReadonlySet<LintRule> = new Set<LintRule>(['code-span-padding', 'hard-break-in-heading', 'list-after-item-text', 'list-number-too-long', 'setext-heading-lines', 'table-header-pipe', 'table-list-cell', 'table-quote-cell', 'tab-reference-layout', 'space-reference-edge', 'unplaced-link', 'number-paragraph']);
 const NUMBER_ONLY = /^\d{1,9}\\[.)]$/;
 const LIST_CELL = /^(?:[*+-]|\d{1,9}\))(?:[ \t]|$)/;
 const LINK_ATTRIBUTE = /\b(?:src|href)\s*=/i;
@@ -63,7 +65,8 @@ export function lintInTree(file: string, text: string, files: ReadonlySet<string
   // preserve setext text and uses historical versions to verify writes.
   // The setext and table rules report text Linear reads differently from
   // Markdown, but Linear's own export can hold it (a rule, text lines and a
-  // rule; a list in a table cell): a document Linear wrote is not left out.
+  // rule; a list in a table cell; an empty quote inside a quote in a cell,
+  // which starts it with `>`): a document Linear wrote is not left out.
   // `unplaced-link` stops only `fix`: the sync sends the text as it is.
   // So does `code-span-padding`: Linear keeps the code, and only writes it
   // without the padding that keeps its outer spaces.
@@ -139,6 +142,11 @@ export function lintText(file: string, text: string, options: LintOptions = {}):
     return sorted();
   }
   lintTree(file, tree, content, report, options);
+  // The tree's offsets leave out a byte order mark at the start of the body.
+  const source = content.replace(/^\uFEFF/, '');
+  for (const at of structuralTabLines(tree, source)) report('tab-indentation', at);
+  // Linear's own export holds the form `fix` writes, which it captures as it is.
+  if (options.linearExport !== true) for (const at of plusLines(source, tree)) report('plus-line-in-item', at);
   const { unsafeLine } = tabReferences(content);
   if (unsafeLine !== undefined) report('tab-reference-layout', unsafeLine);
   for (const at of spaceReferenceEdges(tree, content)) report('space-reference-edge', at);
@@ -286,6 +294,12 @@ function childrenLength(reference: LinkReference, length: (from: number, to: num
   return first === undefined || last === undefined ? 0 : length(start(first), end(last));
 }
 
+/** Whether the table's header line holds a `|`; without one Linear keeps the table as text. */
+function headerHasPipe(body: string, table: Table): boolean {
+  const lineEnd = body.indexOf('\n', start(table));
+  return body.slice(start(table), lineEnd === -1 ? undefined : lineEnd).includes('|');
+}
+
 /** Whether Linear ends the table at this row or a row above it (`endingRow`). */
 function endedBefore(body: string, table: Table, row: Nodes): boolean {
   let ended = endedRows.get(table);
@@ -424,8 +438,7 @@ function lintTree(file: string, tree: Root, body: string, report: (rule: LintRul
       case 'table': {
         if (node.align?.some((align) => align !== null)) report('table-alignment', line(node));
         // Linear needs a pipe in the header row: without one the table is text.
-        const lineEnd = body.indexOf('\n', start(node));
-        if (!body.slice(start(node), lineEnd === -1 ? undefined : lineEnd).includes('|')) report('table-header-pipe', line(node));
+        if (!headerHasPipe(body, node)) report('table-header-pipe', line(node));
         break;
       }
       case 'tableCell': {
@@ -449,6 +462,11 @@ function lintTree(file: string, tree: Root, body: string, report: (rule: LintRul
         // A number and a dot keep their text; an escaped marker stays text.
         const list = first?.type === 'text' && last !== undefined && LIST_CELL.test(body.slice(start(first), end(last)));
         if (list && table?.type === 'table' && table.children[0] !== row) report('table-list-cell', line(node));
+        // A `>` that starts a body cell is a quote there, which Linear writes
+        // without the `>` (`>>` can take the rows and text below it into the
+        // cell). An escaped or encoded `>`, one in a header cell and one in a
+        // table whose header has no pipe (text in Linear) stay text; `fix` escapes it.
+        if (first?.type === 'text' && body[start(first)] === '>' && table?.type === 'table' && table.children[0] !== row && headerHasPipe(body, table)) report('table-quote-cell', line(node));
         break;
       }
       case 'text': {
@@ -465,6 +483,8 @@ function lintTree(file: string, tree: Root, body: string, report: (rule: LintRul
         break;
       }
       case 'link':
+        // Linear drops a link without text on write: `fix` writes its URL as the text.
+        if (node.children.length === 0) report('link-without-text', line(node));
         if (!allowedLink(node.url)) report('link-scheme', line(node));
         if (node.title) report('link-title', line(node));
         if (node.children.some((child) => child.type === 'image' || child.type === 'imageReference')) report('image-in-link', line(node));
@@ -473,6 +493,7 @@ function lintTree(file: string, tree: Root, body: string, report: (rule: LintRul
         const definition = definitions.get(node.identifier);
         if (definition !== undefined && !allowedLink(definition.url)) report('link-scheme', line(node));
         if (definition?.title) report('link-title', line(node));
+        if (node.children.length === 0) report('link-without-text', line(node));
         if (node.children.some((child) => child.type === 'image' || child.type === 'imageReference')) report('image-in-link', line(node));
         break;
       }
@@ -529,13 +550,21 @@ function lintTree(file: string, tree: Root, body: string, report: (rule: LintRul
     // The section parse splits lines the ordinary parse reads as one
     // paragraph, so it can pass the parser's limits where that one did not.
     let firstInItem: number[] = [];
+    let plusText: number[] = [];
+    // Escaped, such a line can join the lines after it, so a section
+    // further down can start its item: read the sections as fix leaves them.
+    // The escapes add no lines: offsets in it give the same line numbers.
+    let escaped = body;
     try {
-      firstInItem = sectionsFirstInItem(body);
+      plusText = plusTextLines(body);
+      escaped = plusTextAsText(body);
+      firstInItem = sectionsFirstInItem(escaped);
     } catch (error) {
       if (!(error instanceof MarkdownLimitError)) throw error;
       report('markdown-complexity', 1);
     }
-    for (const at of firstInItem) report('block-first-in-list-item', body.slice(0, at).split('\n').length);
+    for (const at of firstInItem) report('block-first-in-list-item', escaped.slice(0, at).split('\n').length);
+    for (const at of plusText) report('section-marker-text', body.slice(0, at).split('\n').length);
   }
 }
 

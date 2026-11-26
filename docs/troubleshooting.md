@@ -370,23 +370,32 @@ the reason is fixed. The summaries list each with its rules:
 
 The `linear-format` hook's rules leave a file out too until it is fixed:
 `footnote`, `subscript`, `table-escaped-pipe`, `table-hash-cell`,
-`image-in-link`, `table-alignment`, `link-title`, `image-title`, `code-in-emphasis`, `hard-break-backslash`,
+`image-in-link`, `table-alignment`, `link-without-text`, `link-title`, `image-title`, `code-in-emphasis`, `hard-break-backslash`,
 `git-conflict-marker`,
-`section-opener`, `url-in-html`, `block-first-in-list-item`, `ordered-task-list`,
+`section-opener`, `section-marker-text`, `plus-line-in-item`, `tab-indentation`, `url-in-html`, `block-first-in-list-item`, `ordered-task-list`,
 `image-not-in-repository`, `image-file-missing` and
 `document-in-assets-folder`. Each is described, with its fix, in
-[linear-format.md](linear-format.md#lint-rules). A list item that opens
+[linear-format.md](linear-format.md#lint-rules). `fix` writes an HTTP(S)
+image as a link and prints the
+[`image-made-link`](linear-format.md#image-made-link) warning; it writes the
+URL of a link without text as its text and prints the
+[`link-text-from-url`](linear-format.md#link-text-from-url) warning. A list item that opens
 with a collapsible section (`1. +++ Notes` with more of the item below
 it) is `block-first-in-list-item`: put a line of text first in the item.
+A file that reached the branch without the hook (an edit on the web, a
+push without hooks) can hold a lone `+` below an item's first line
+(`plus-line-in-item`) or tabs in its indentation (`tab-indentation`): run
+`mdbisync fix` on it and commit the result, and the next run syncs it.
 
 `mdbisync lint` and `mdbisync fix` also report `hard-break-in-heading`
 when converting a setext heading to one line would lose a hard break, and
 `setext-heading-lines`, `table-header-pipe`, `table-list-cell`,
-`list-after-item-text`, `list-number-too-long` and `number-paragraph` for
+`table-quote-cell`, `list-after-item-text`, `list-number-too-long` and
+`number-paragraph` for
 text Linear reads differently from Markdown; the sync sends such a file as
 it is, since Linear's own export can hold that text. See
 [hard breaks in headings](linear-format.md#hard-break-in-heading) and the
-six rules in [linear-format.md](linear-format.md#lint-rules).
+seven rules in [linear-format.md](linear-format.md#lint-rules).
 They also report `unplaced-link` when `fix` cannot write a web address found
 inside other text as a link; the sync sends such a file as it is. See
 [unplaced links](linear-format.md#unplaced-link).
@@ -403,6 +412,9 @@ upload check now refuses. It leaves no file out; a document that links
 the file again from Linear is blocked with a red mark and a comment. Remove
 or replace the file
 ([linear-format.md](linear-format.md#upload-file-refused)).
+
+The warning [`list-number-as-text`](linear-format.md#list-number-as-text),
+a number in a list item that reads as text, leaves no file out either.
 
 External http(s) and path images, and image uploads answering 404 or 410,
 become ordinary links in the sync pull request. Empty and `data:` images are
@@ -581,6 +593,8 @@ content).
 - `Invalid merge-file conflict output`, `git merge-tree gave no tree`
 - `invalid repository path "<path>"`
 - `git object <id> is missing`, `git object <id> is a <type>, not a blob`
+- `a git tree object could not be read`, `invalid tree entry name <name>`, `git object name <name> cannot be asked in a batch`, `git <command> gave an answer that could not be read`
+- `the process that starts git commands ended (<reason>)`: something stopped the run's helper process for git commands; run again.
 - `a push names the same ref twice`
 - `ids.json has an invalid entry for a path`; `reserved-ids.json`, `superseded-ids.json`, `uploads.json` or `written.json` `has an invalid entry`
 - `ids.json maps a document id to more than one path`: the recorded state assigns the same Linear document to multiple files. Recover with an initial sync if it repeats.

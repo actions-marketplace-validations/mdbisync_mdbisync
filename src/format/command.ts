@@ -3,13 +3,15 @@
 
 import { closeSync, constants, existsSync, fstatSync, ftruncateSync, lstatSync, openSync, readdirSync, readFileSync, readlinkSync, realpathSync, statSync, writeSync, type Stats } from 'node:fs';
 import { basename, join, relative, resolve, sep } from 'node:path';
-import { fixText } from './fix.ts';
+import { emptyLinkLines, fixText, linearForm, type FixOptions } from './fix.ts';
 import { duplicateTitles, linkedFileCheck, lintText } from './lint.ts';
-import { MarkdownLimitError } from './markdown.ts';
-import { FIXED_RULES, LINT_RULES, type Finding } from './rules.ts';
+import { lineCount, MarkdownLimitError, splitFile } from './markdown.ts';
+import { listTextWarnings } from './list-text.ts';
+import { FIXED_RULES, LINT_RULES, LINT_WARNINGS, type Finding, type Warning } from './rules.ts';
 import { parseLfsPointer } from '../state/lfs.ts';
 import { lineText } from '../run/output.ts';
 import { admitsCapturedFile, isCaptureName } from '../sync/upload-type.ts';
+import { ImageRepairBudgetError, webImageLinks } from '../sync/image-links.ts';
 
 export interface CommandResult {
   readonly exitCode: number;
@@ -89,8 +91,47 @@ function lintAll(files: readonly string[], cwd: string): Finding[] {
   return [...findings, ...duplicateTitles(files)];
 }
 
+/**
+ * The text with its HTTP(S) images written as links, as a pull repairs them,
+ * and the line of each such image; undefined when it has none, or when the
+ * repair cannot run within its limits (lint reports the images then).
+ */
+function withWebImageLinks(text: string): { text: string; lines: number[] } | undefined {
+  const { head, body } = splitFile(text);
+  try {
+    const linked = webImageLinks(body);
+    if (linked === undefined) return undefined;
+    const offset = lineCount(head);
+    return { text: head + linked.body, lines: linked.lines.map((line) => line + offset) };
+  } catch (error) {
+    if (error instanceof ImageRepairBudgetError || error instanceof MarkdownLimitError) return undefined;
+    throw error;
+  }
+}
+
 function describe(findings: readonly Finding[]): string {
   return findings.map((finding) => `${lineText(finding.file)}:${finding.line}: ${finding.rule}: ${lineText(finding.message)}\n`).join('');
+}
+
+function describeWarnings(found: readonly Warning[]): string {
+  return found.map((warning) => `${lineText(warning.file)}:${warning.line}: warning: ${warning.rule}: ${lineText(warning.message)}\n`).join('');
+}
+
+/**
+ * The warnings of the files, one line each; they never set the exit code. A
+ * file that cannot be read any more (renamed while the command ran) has none.
+ */
+function warnings(files: readonly string[], cwd: string): string {
+  const found: Warning[] = files.flatMap((file) => {
+    let text: string;
+    try {
+      text = readFileSync(join(cwd, file), 'utf8');
+    } catch {
+      return [];
+    }
+    return listTextWarnings(file, text);
+  });
+  return describeWarnings(found);
 }
 
 /**
@@ -124,10 +165,14 @@ function isOwnPath(root: string, path: string): boolean {
   }
 }
 
-/** The file in Linear's form, or undefined when rewriting it takes it over the Markdown limits. */
-function fixedText(file: string, text: string, cwd: string): string | undefined {
+/**
+ * The file in Linear's form, or undefined when rewriting it takes it over the
+ * Markdown limits. `form` defaults to `fixText`, which returns a text it
+ * leaves to its author as it is.
+ */
+function fixedText(file: string, text: string, cwd: string, form: (text: string, options: FixOptions) => string = fixText): string | undefined {
   try {
-    return fixText(text, { linkedFileExists: linkedFileResolver(file, cwd) });
+    return form(text, { linkedFileExists: linkedFileResolver(file, cwd) });
   } catch (error) {
     if (error instanceof MarkdownLimitError) return undefined;
     throw error;
@@ -139,7 +184,11 @@ function complexity(file: string): Finding {
   return { file, line: 1, rule: 'markdown-complexity', message: LINT_RULES['markdown-complexity'] };
 }
 
-/** `lint`: exit 1 and one line per finding when Linear would lose or alter something, or a file is not in Linear's form. */
+/**
+ * `lint`: exit 1 and one line per finding when Linear would lose or alter
+ * something, or a file is not in Linear's form. Warnings are printed too, but
+ * alone they exit 0.
+ */
 export function runLint(paths: readonly string[], cwd: string = process.cwd()): CommandResult {
   return withEscapedErrors(() => lint(paths, cwd));
 }
@@ -158,10 +207,16 @@ function lint(paths: readonly string[], cwd: string): CommandResult {
     return fixed !== undefined && fixed !== text;
   });
   const stdout = describe(findings) + unfixed.map((file) => `${lineText(file)}: not in Linear's form; run fix\n`).join('');
-  return { exitCode: stdout === '' ? 0 : 1, stdout, stderr: '' };
+  return { exitCode: stdout === '' ? 0 : 1, stdout: stdout + warnings(files, cwd), stderr: '' };
 }
 
-/** `fix`: rewrites files into Linear's form; exit 1 when a file changed or lint found a problem `fix` leaves to the author. */
+/**
+ * `fix`: rewrites files into Linear's form; exit 1 when a file changed or lint
+ * found a problem `fix` leaves to the author. An image from an HTTP(S) URL
+ * becomes a link, and a link without text gets its URL as the text, each
+ * with a warning. The warnings of the files, as written, are
+ * printed too, but alone they exit 0.
+ */
 export function runFix(paths: readonly string[], cwd: string = process.cwd()): CommandResult {
   return withEscapedErrors(() => fix(paths, cwd));
 }
@@ -172,25 +227,58 @@ function fix(paths: readonly string[], cwd: string): CommandResult {
   const files = markdownFiles(paths, cwd);
   // A file with a lint finding, a colliding title included, is left as it is:
   // its author decides. Only the findings `fix` writes in Linear's form do not stop it.
+  // HTTP(S) images do not stop it either: a file with them is judged by its
+  // text with them written as links. A file left as it is reports the findings
+  // of its text as written, and those the links would bring.
   const before = [...lintAll(files, cwd), ...refusedUploads(paths, cwd)];
-  const failing = new Set(before.filter((finding) => !FIXED_RULES.has(finding.rule)).map((finding) => finding.file));
+  const decisive = new Map<string, Finding[]>();
+  for (const file of new Set(before.filter((finding) => finding.rule === 'image-not-in-repository').map((finding) => finding.file))) {
+    const linked = withWebImageLinks(readFileSync(join(cwd, file), 'utf8'));
+    // A rewrite past the content limit is saved and reported, as for any other rewrite.
+    if (linked !== undefined) decisive.set(file, lintText(file, linked.text, { linkedFileExists: linkedFileResolver(file, cwd) }).filter((finding) => finding.rule !== 'content-too-long'));
+  }
+  // Such a file is judged by the lint of that text, and by the findings that
+  // are not about its text: a colliding title and a refused upload.
+  const blocks = (finding: Finding): boolean => !FIXED_RULES.has(finding.rule)
+    && (!decisive.has(finding.file) || finding.rule === 'duplicate-title' || finding.rule === 'upload-file-refused');
+  const failing = new Set([...before.filter(blocks), ...[...decisive.values()].flat().filter((finding) => !FIXED_RULES.has(finding.rule))].map((finding) => finding.file));
+  for (const [file, findings] of decisive) {
+    if (!failing.has(file)) continue;
+    const reported = new Set(before.filter((finding) => finding.file === file).map((finding) => finding.rule));
+    before.push(...findings.filter((finding) => !FIXED_RULES.has(finding.rule) && !reported.has(finding.rule)));
+  }
   const changed: string[] = [];
   const moved: string[] = [];
+  const madeLinks: Warning[] = [];
+  const madeLines = new Map<string, { imageLines: number[]; textLines: number[] }>();
   for (const file of files) {
     if (failing.has(file)) continue;
     const outcome = fixFile(file, cwd);
     if (outcome === 'complex') before.push(complexity(file));
     else if (outcome === 'moved') moved.push(file);
-    else if (outcome === 'fixed') changed.push(file);
+    else if (outcome !== 'unchanged') {
+      changed.push(file);
+      madeLines.set(file, outcome);
+    }
   }
   // The rewritten files are linted again: their earlier findings were only
   // ones `fix` writes in Linear's form, and what is left of them is reported.
   const rewritten = new Set(changed);
-  const findings = [...before.filter((finding) => !rewritten.has(finding.file)), ...lintAll(changed, cwd)];
+  const after = lintAll(changed, cwd);
+  const findings = [...before.filter((finding) => !rewritten.has(finding.file)), ...after];
+  for (const file of changed) {
+    const { imageLines, textLines } = madeLines.get(file)!;
+    const made: Warning[] = [
+      ...imageLines.map((line) => ({ file, line, rule: 'image-made-link' as const, message: LINT_WARNINGS['image-made-link'] })),
+      ...textLines.map((line) => ({ file, line, rule: 'link-text-from-url' as const, message: LINT_WARNINGS['link-text-from-url'] })),
+    ];
+    madeLinks.push(...made.sort((a, b) => a.line - b.line));
+  }
   const stdout = changed.map((file) => `${lineText(file)}: fixed\n`).join('')
     + moved.map((file) => `${lineText(file)}: moved while fix ran; left unchanged\n`).join('')
     + describe(findings);
-  return { exitCode: stdout === '' ? 0 : 1, stdout, stderr: '' };
+  const kept = new Set(moved);
+  return { exitCode: stdout === '' ? 0 : 1, stdout: stdout + describeWarnings(madeLinks) + warnings(files.filter((file) => !kept.has(file)), cwd), stderr: '' };
 }
 
 /**
@@ -216,7 +304,7 @@ function withEscapedErrors(command: () => CommandResult): CommandResult {
  * link after the search cannot redirect the write; such a file is 'moved'.
  * A file that needs no change is only read, so it may be read-only.
  */
-function fixFile(file: string, cwd: string): 'fixed' | 'unchanged' | 'complex' | 'moved' {
+function fixFile(file: string, cwd: string): { imageLines: number[]; textLines: number[] } | 'unchanged' | 'complex' | 'moved' {
   const path = join(cwd, file);
   const reader = openOwnFile(path, constants.O_RDONLY);
   if (reader === undefined) return 'moved';
@@ -230,7 +318,11 @@ function fixFile(file: string, cwd: string): 'fixed' | 'unchanged' | 'complex' |
   } finally {
     closeSync(reader);
   }
-  const fixed = fixedText(file, text, cwd);
+  // A text with its web images as links that `fix` leaves to its author keeps
+  // its images too: the file stays as it is.
+  const linked = withWebImageLinks(text);
+  const fixed = linked === undefined ? fixedText(file, text, cwd)
+    : fixedText(file, linked.text, cwd, (candidate, options) => linearForm(candidate, options) ?? text);
   if (fixed === undefined) return 'complex';
   if (fixed === text) return 'unchanged';
   const writer = openOwnFile(path, constants.O_WRONLY);
@@ -240,7 +332,9 @@ function fixFile(file: string, cwd: string): 'fixed' | 'unchanged' | 'complex' |
     const bytes = Buffer.from(fixed, 'utf8');
     ftruncateSync(writer, 0);
     for (let written = 0; written < bytes.length;) written += writeSync(writer, bytes, written, bytes.length - written, written);
-    return 'fixed';
+    // `fix` gives every link without text that has a URL its URL, or none (`emptyLinksAsUrls`).
+    const textLines = emptyLinkLines(fixed).length === 0 ? emptyLinkLines(text) : [];
+    return { imageLines: linked?.lines ?? [], textLines };
   } finally {
     closeSync(writer);
   }

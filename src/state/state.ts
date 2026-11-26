@@ -5,6 +5,7 @@
 // the other changes nothing.
 
 import { type StateConfig, STORES, type Store, branchRef, localRef, stateRef, suspendedBranch } from './config.ts';
+import { ancestorWithin, showCommit } from './commit-format.ts';
 import { type Git, GitError, type Oid, mapLimit } from './git.ts';
 import { type LfsPointer, type LfsReadResult, lfsReader, lfsRemote, parseLfsPointer } from './lfs.ts';
 import { type CommitIdentity, type TreeEntry, commitTree, listTree, readBlobs } from './objects.ts';
@@ -44,14 +45,18 @@ export async function fetchState(git: Git, config: StateConfig): Promise<Fetched
   await git.run(['fetch', '--no-tags', '--no-write-fetch-head', '--quiet', config.remote, ...refspecs]);
   const read = async (ref: string): Promise<Oid | null> => {
     const local = localRef(config, ref);
-    if (advertised.has(ref)) return git.text(['rev-parse', '--verify', `${local}^{commit}`]);
-    await git.run(['update-ref', '-d', local]);
+    if (advertised.has(ref)) return (await git.objectInfo(`${local}^{commit}`))?.oid ?? git.text(['rev-parse', '--verify', `${local}^{commit}`]);
+    gone.push(local);
     return null;
   };
 
+  const gone: string[] = [];
   const state = {} as StateSnapshot;
   for (const store of STORES) state[store] = await read(stateRef(config, store));
-  return { tracked: (await read(tracked)) as Oid, sync: await read(sync), suspended: await read(suspended), state };
+  const fetched = { tracked: (await read(tracked)) as Oid, sync: await read(sync), suspended: await read(suspended), state };
+  // One call forgets them all, as `update-ref -d` does for each: a ref that is not there is no error.
+  if (gone.length > 0) await git.run(['update-ref', '--stdin'], { input: gone.map((ref) => `delete ${ref}\n`).join('') });
+  return fetched;
 }
 
 /** The remote's values of exactly these refs; a ref the remote lacks is absent. */
@@ -206,8 +211,7 @@ export async function pushAtomic(git: Git, config: StateConfig, updates: readonl
   // Runs of one repository share a concurrency group, which closes it.
   for (const update of changing) {
     if (update.expected !== null && update.replace !== true) {
-      const ancestor = await git.run(['merge-base', '--is-ancestor', update.expected, update.next], { okCodes: [0, 1] });
-      if (ancestor.code !== 0) throw new NotFastForwardError(update.ref);
+      if (!await isAncestor(git, update.expected, update.next)) throw new NotFastForwardError(update.ref);
     }
   }
 
@@ -355,6 +359,11 @@ export interface IdEntry {
    * signature of it (`PushedKey.repairMac`): a repair without a valid one, in any form, is not the sync's and is never applied.
    */
   pullRewrite?: { source?: Oid; hash: string; observedHash: string; replacement: string; images: Array<{image: number; total: number; line: number}>; mac?: string };
+  /**
+   * The mdbisync version whose pull last read a suspended document's text from Linear. It is read again when this
+   * differs, so a lane an older version captured takes a newer reading.
+   */
+  capturedWith?: string;
   /** The active hold; retained across renames and captured removals. */
   suspended?: SuspensionEpisode;
   /** First write after release must use this Linear commit as its base. */
@@ -433,7 +442,7 @@ export function initialSyncProgressMessage(tracked: Oid): string {
 /** When `commit` is a progress commit of an unfinished initial sync, the tracked commit it names; otherwise null. */
 export async function readInitialSyncProgress(git: Git, commit: Oid | null): Promise<{ tracked: Oid | null } | null> {
   if (commit === null) return null;
-  const message = (await git.run(['show', '-s', '--format=%B', commit])).stdout.toString('utf8');
+  const message = `${await showCommit(git, '%B', commit)}\n`;
   const [subject] = message.split('\n');
   if (subject !== INITIAL_SYNC_PROGRESS) return null;
   return { tracked: /^Tracked: ([0-9a-f]{40,64})$/m.exec(message)?.[1] ?? null };
@@ -446,9 +455,13 @@ export async function readInitialSyncProgress(git: Git, commit: Oid | null): Pro
  */
 export const INITIAL_SYNC_FROM_LINEAR_RECORD = "Initial sync from Linear: Linear's state";
 
-/** Whether `commit` is `of` or one of its ancestors. */
+/**
+ * Whether `commit` is `of` or one of its ancestors, as
+ * `git merge-base --is-ancestor` answers: read from the commits through the
+ * object reader where it can be, from git otherwise.
+ */
 export async function isAncestor(git: Git, commit: Oid, of: Oid): Promise<boolean> {
-  return (await git.run(['merge-base', '--is-ancestor', commit, of], { okCodes: [0, 1] })).code === 0;
+  return await ancestorWithin(git, commit, of) ?? (await git.run(['merge-base', '--is-ancestor', commit, of], { okCodes: [0, 1] })).code === 0;
 }
 
 /**
@@ -548,8 +561,7 @@ export function readSupersededIds(git: Git, commit: Oid | null): Promise<Superse
 /** A JSON object of non-empty strings beside `ids.json`; empty when the commit does not have the file. */
 async function readStringMap(git: Git, commit: Oid | null, file: string): Promise<Map<string, string>> {
   if (commit === null) return new Map();
-  const read = await git.run(['cat-file', 'blob', `${commit}:${file}`], { okCodes: [0, 128] });
-  if (read.code !== 0) return new Map();
+  if (await git.readBlob(`${commit}:${file}`) === null) return new Map();
   const data = await readJsonFile(git, commit, file);
   const map = new Map<string, string>();
   for (const [key, value] of Object.entries(data)) {
@@ -569,8 +581,7 @@ export const WRITTEN_FILE = 'written.json';
 
 export async function readWrittenHashes(git: Git, commit: Oid | null): Promise<Map<string, string>> {
   if (commit === null) return new Map();
-  const read = await git.run(['cat-file', 'blob', `${commit}:${WRITTEN_FILE}`], { okCodes: [0, 128] });
-  if (read.code !== 0) return new Map();
+  if (await git.readBlob(`${commit}:${WRITTEN_FILE}`) === null) return new Map();
   const data = await readJsonFile(git, commit, WRITTEN_FILE);
   const map = new Map<string, string>();
   for (const [path, hash] of Object.entries(data)) {
@@ -594,11 +605,11 @@ export const SYNC_PUSHED_FILE = 'sync-pushed.json';
  */
 export async function readSyncPushed(git: Git, commit: Oid | null): Promise<PushedRecord | undefined> {
   if (commit === null) return undefined;
-  const read = await git.run(['cat-file', 'blob', `${commit}:${SYNC_PUSHED_FILE}`], { okCodes: [0, 128] });
-  if (read.code !== 0) return undefined;
+  const read = await git.readBlob(`${commit}:${SYNC_PUSHED_FILE}`);
+  if (read === null) return undefined;
   let data: { head?: unknown; mac?: unknown } | null;
   try {
-    data = JSON.parse(read.stdout.toString('utf8')) as { head?: unknown; mac?: unknown } | null;
+    data = JSON.parse(read.toString('utf8')) as { head?: unknown; mac?: unknown } | null;
   } catch {
     throw new Error(message('state.invalid-json', { file: SYNC_PUSHED_FILE, commit }));
   }
@@ -673,6 +684,7 @@ function isIdEntry(value: unknown): value is IdEntry {
   if (entry.observedDigest !== undefined && (typeof entry.observedDigest !== 'string' || !/^[0-9a-f]{64}$/.test(entry.observedDigest))) return false;
   if (entry.plainFiles !== undefined && (!Array.isArray(entry.plainFiles) || !entry.plainFiles.every(path => typeof path === 'string'))) return false;
   if (entry.releasePaths !== undefined && (!Array.isArray(entry.releasePaths) || !entry.releasePaths.every((path) => typeof path === 'string'))) return false;
+  if (entry.capturedWith !== undefined && typeof entry.capturedWith !== 'string') return false;
   if (entry.releaseBase !== undefined && (typeof entry.releaseBase !== 'string' || !/^[0-9a-f]{40,64}$/.test(entry.releaseBase))) return false;
   if (entry.suspended !== undefined) {
     const episode = entry.suspended as SuspensionEpisode | null;
@@ -726,12 +738,11 @@ async function readJsonFile(git: Git, commit: Oid | null, file: string, options:
   if (commit === null) return {};
   // A state commit without its file is damaged state, not an empty map:
   // reading it as empty would make the sync forget every id.
-  const read = await git.run(['cat-file', 'blob', `${commit}:${file}`], { okCodes: [0, 128] });
-  if (read.code !== 0) {
+  const blob = await git.readBlob(`${commit}:${file}`);
+  if (blob === null) {
     if (options.optional) return {};
     throw new Error(message('state.file-missing', { file, commit }));
   }
-  const blob = read.stdout;
   let data: unknown;
   try {
     data = JSON.parse(blob.toString('utf8'));

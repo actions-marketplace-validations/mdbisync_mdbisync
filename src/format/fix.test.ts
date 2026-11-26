@@ -8,9 +8,12 @@ import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import { describe, it } from 'node:test';
 import { fixLinearText, fixText, relativeFileBlocksAsLinks } from './fix.ts';
-import { CONTENT_LIMIT } from './rules.ts';
+import { CONTENT_LIMIT, FIXED_RULES } from './rules.ts';
 import { linkedFileCheck, lintInTree, lintText } from './lint.ts';
 import { parse, sameAsLinear, sameMarkdown, splitFile, visit } from './markdown.ts';
+
+/** Findings `fix` does not write away: what lint still reports after it. */
+const leftToAuthor = (findings: ReturnType<typeof lintText>): ReturnType<typeof lintText> => findings.filter(({ rule }) => !FIXED_RULES.has(rule));
 
 const cases: Array<[string, string, string]> = [
   ['CRLF and CR line endings become LF', 'One.\r\n\r\nTwo.\rThree.', 'One.\n\nTwo.\nThree.'],
@@ -72,6 +75,9 @@ const cases: Array<[string, string, string]> = [
   ['an MP3 task keeps its break and a numbered MP3 stays on the marker line', '- [ ] [Note](note.mp3)\n\n3. [Note](note.mp3)', '- [ ] \n  [Note](note.mp3)\n\n3. [Note](<note.mp3>)'],
   ['a list item with only a video link becomes a video on its line', '* [Demo](media/demo.mp4)\n* [Clip](<clip one.MOV>)\n* [Loop](loop.webm)', '* [Demo](media/demo.mp4)\n* [Clip](clip%20one.MOV)\n* [Loop](loop.webm)'],
   ['tables get outer pipes and short separators', 'A | B\n--- | ---\n1 | 2', '| A | B |\n| -- | -- |\n| 1 | 2 |\n'],
+  ['a > that starts a body cell gets the escape Linear writes, wherever the row or column', '| A | B |\n| --- | --- |\n| > Draft | >Note |\n| > | x > y |\n| Plan | >> Review |\n| > **Bold** | **> Kept** |', '| A | B |\n| -- | -- |\n| \\> Draft | \\>Note |\n| \\> | x > y |\n| Plan | \\>> Review |\n| \\> **Bold** | **> Kept** |\n'],
+  ['an escaped > at a body cell\'s start keeps its escape, and the second of two loses it as in Linear', '| A |\n| -- |\n| \\> Draft |\n| \\>\\> Note |', '| A |\n| -- |\n| \\> Draft |\n| \\>> Note |\n'],
+  ['a > in a quoted table\'s body cell is escaped', '> | A |\n> | -- |\n> | > Draft |', '> | A |\n> | -- |\n> | \\> Draft |\n'],
   ['a hash header cell is escaped', '| # | Customer |\n| --- | --- |\n| 1 | Example |', '| \\# | Customer |\n| -- | -- |\n| 1 | Example |\n'],
   ['a hash header in a quote is escaped', '> | Name | # |\n> | -- | -- |\n> | Example | 1 |', '> | Name | \\# |\n> | -- | -- |\n> | Example | 1 |\n'],
   ['hash escapes keep cell text and inline markup', '| \\# | `#` | **#** | Issue # |\n| -- | -- | -- | -- |\n| \\# | `#` | **#** | Issue # |', '| \\# | `#` | **#** | Issue # |\n| -- | -- | -- | -- |\n| \\# | `#` | **#** | Issue # |\n'],
@@ -488,7 +494,9 @@ describe('a code span\'s fence and padding, as Linear writes them', () => {
   it('writes a quote\'s tab Linear keeps in code that would otherwise be spaces alone', () => {
     // Markdown reads the tab's columns as three spaces; Linear holds a space and a tab.
     assert.equal(fixText('> `\n>\t`'), '> ` \t`');
-    assert.deepEqual(lintText('doc.md', '> `\n>\t`'), []);
+    // The tab after `>` is in the quote's prefix: lint reports it until fix has written the line.
+    assert.deepEqual(lintText('doc.md', '> `\n>\t`').map(({ rule, line }) => `${rule}@${line}`), ['tab-indentation@2']);
+    assert.deepEqual(lintText('doc.md', '> ` \t`'), []);
   });
 
   it('leaves code to its author whose outer spaces Linear drops', () => {
@@ -1120,7 +1128,7 @@ describe('what fix leaves alone', () => {
       // `sameMarkdown` keeps a file block's empty marker line apart, so compare what Markdown reads.
       assert.deepEqual(readMarkdown(fixed), readMarkdown(text), `same document: ${text}`);
       assert.equal(fixText(fixed), fixed, `a second fix changes nothing: ${text}`);
-      assert.deepEqual(lintText('a.md', fixed), lintText('a.md', text), `lint finds nothing new: ${text}`);
+      assert.deepEqual(lintText('a.md', fixed), leftToAuthor(lintText('a.md', text)), `lint finds nothing new: ${text}`);
     }
   });
 
@@ -1159,7 +1167,7 @@ describe('what fix leaves alone', () => {
       assert.equal(fixed, expected, text);
       assert.deepEqual(readMarkdown(fixed), readMarkdown(text), `same document: ${text}`);
       assert.equal(fixText(fixed), fixed, `a second fix changes nothing: ${text}`);
-      assert.deepEqual(lintText('a.md', fixed), lintText('a.md', text), `lint finds nothing new: ${text}`);
+      assert.deepEqual(lintText('a.md', fixed), leftToAuthor(lintText('a.md', text)), `lint finds nothing new: ${text}`);
     }
   });
 
@@ -1251,7 +1259,7 @@ describe('what fix leaves alone', () => {
       ['1. Plan\n\n   Note\n   2.', '1. Plan\n\n   Note\n   2.'],
       ['* Plan\n  Note\n  *', '* Plan\n  Note\n  \\*'],
       ['1. Trip\n   1. Plan\n      3)', '1. Trip\n   1. Plan\n      3)'],
-      ['1. Plan\n   +', '1. Plan\n   +'],
+      // A lone `+` there: fix writes it with a no-break space (see the plus line test).
       // Numbered lines after it: Linear reads the items of a list, nested in
       // the empty item where they reach its content, else after it. Their
       // numbers are not 1 and an empty item cannot interrupt the paragraph:
@@ -1451,7 +1459,7 @@ describe('what fix leaves alone', () => {
       assert.equal(fixed, expected, text);
       assert.deepEqual(readMarkdown(fixed), readMarkdown(text), `same document: ${text}`);
       assert.equal(fixText(fixed), fixed, `a second fix changes nothing: ${text}`);
-      assert.deepEqual(lintText('a.md', fixed), lintText('a.md', text), `lint finds nothing new: ${text}`);
+      assert.deepEqual(lintText('a.md', fixed), leftToAuthor(lintText('a.md', text)), `lint finds nothing new: ${text}`);
     }
   });
 
@@ -1780,7 +1788,7 @@ describe('what fix leaves alone', () => {
     }
   });
 
-  it('writes a lone + or \\+ right below an item\'s first line, before more text, with a no-break space, as Linear keeps it', () => {
+  it('writes a lone + or \\+ right below an item\'s first line with a no-break space, as Linear keeps it', () => {
     // Linear reads a lone `+` there as an empty item (code four or more
     // columns past the item's text) and drops the escape of `\+`; a no-break
     // space after it keeps it text.
@@ -1800,8 +1808,10 @@ describe('what fix leaves alone', () => {
       ['* `A\n  B`\n  +\n  More', `* \`A B\`\n  +${nbsp}\n  More`],
       // A hard break after the sign stays.
       ['* Plan\n  +  \n  More', `* Plan\n  +${nbsp}  \n  More`],
-      // Kept: the paragraph's last line, a later line, a quote, the top level and a plus before text.
-      ['1. Plan\n   +', '1. Plan\n   +'],
+      // As the paragraph's last line too, also before an empty item of the list around it.
+      ['1. Plan\n   +', `1. Plan\n   +${nbsp}`],
+      ['* Week\n  * Fruit\n    * 3 apples\n        +\n  * \n* Done', `* Week\n  * Fruit\n    * 3 apples\n      +${nbsp}\n  * \n* Done`],
+      // Kept: a later line, a quote, the top level and a plus before text.
       ['1. Plan\n   Note\n   +\n   More', '1. Plan\n   Note\n   +\n   More'],
       ['> 1. Plan\n>    +\n>    More', '> 1. Plan\n>    +\n>    More'],
       ['Plan\n+\nMore', 'Plan\n+\nMore'],
@@ -1819,7 +1829,7 @@ describe('what fix leaves alone', () => {
   });
 
   it('writes a bare plus on a paragraph continuation without creating an item', () => {
-    for (const output of ['Plan\n+', '* Plan\n  +', '> Plan\n> +']) {
+    for (const output of ['Plan\n+', '* Plan\n  Note\n  +', '> Plan\n> +']) {
       const input = output.slice(0, -1) + '\\+';
       assert.equal(fixText(input), output);
       assert.equal(fixText(output), output);
@@ -1897,7 +1907,7 @@ describe('what fix leaves alone', () => {
       assert.equal(fixed, expected, text);
       assert.deepEqual(readMarkdown(fixed), readMarkdown(text), `same document: ${text}`);
       assert.equal(fixText(fixed), fixed, `a second fix changes nothing: ${text}`);
-      assert.deepEqual(lintText('a.md', fixed), lintText('a.md', text), `lint finds nothing new: ${text}`);
+      assert.deepEqual(lintText('a.md', fixed), leftToAuthor(lintText('a.md', text)), `lint finds nothing new: ${text}`);
     }
     const [quote] = parse(fixText('> `a\n--\n> b`')).children;
     const [paragraph] = (quote as Blockquote).children;
@@ -2076,7 +2086,7 @@ describe('what fix leaves alone', () => {
       const once = fixText(input);
       assert.equal(once, expected, JSON.stringify(input));
       assert.equal(fixText(once), once, `${JSON.stringify(input)}: the result is a fixed point`);
-      assert.deepEqual(lintText('a.md', once), lintText('a.md', input), `${JSON.stringify(input)}: lint finds nothing new`);
+      assert.deepEqual(lintText('a.md', once), leftToAuthor(lintText('a.md', input)), `${JSON.stringify(input)}: lint finds nothing new`);
       const paragraph = parse(once).children[0] as Paragraph;
       assert.equal(paragraph.children.length, 1, `${JSON.stringify(input)}: one link`);
       const link = paragraph.children[0];
@@ -2178,6 +2188,33 @@ describe('what fix leaves alone', () => {
         assert.deepEqual(lintText('stock.md', expected), [], input);
         assert.ok(sameMarkdown(expected, input), input);
       }
+    }
+  });
+
+  it('replaces exactly the shortcodes Linear replaces', () => {
+    // Names Linear knows that GitHub's set lacks, in text and in link text.
+    assert.equal(fixText('Due :spiral_calendar_pad: soon :face_with_rolling_eyes:'), 'Due \u{1F5D3}\u{FE0F} soon \u{1F644}');
+    assert.equal(fixText('[:spiral_calendar_pad: plan](<https://example.com/a>)'), '[\u{1F5D3}\u{FE0F} plan](<https://example.com/a>)');
+    // Names Linear leaves as text: GitHub-only names, other aliases, emoji
+    // newer than Linear's set, other letter case.
+    for (const text of ['Flag :albania: :1st_place_medal:', 'Ok :thumbsup: :satisfied:', 'New :shaking_face:', 'Case :Smile:']) {
+      assert.equal(fixText(text), text, text);
+    }
+    assert.equal(fixText('[:albania: trip](<https://example.com/a>)'), '[:albania: trip](<https://example.com/a>)');
+    // Linear's emoji for a name GitHub maps to another one.
+    assert.equal(fixText('Mail :email:'), 'Mail \u{2709}\u{FE0F}');
+    // The keycap asterisk keeps its `*` escaped, as Linear writes it.
+    assert.equal(fixText('Star :keycap_star: and *me*'), 'Star \\*\u{FE0F}\u{20E3} and *me*');
+    // A shortcode next to an emphasis run stays when its emoji would change how the run reads.
+    assert.equal(fixText('Due :spiral_calendar_pad:**(tomorrow)**'), 'Due :spiral_calendar_pad:**(tomorrow)**');
+    assert.equal(fixText('Due **:tada:** now'), 'Due **\u{1F389}** now');
+    // Literal asterisks get Linear's escapes, so the emoji cannot make them emphasis.
+    assert.equal(fixText('*x :spiral_calendar_pad:*y'), '\\*x \u{1F5D3}\u{FE0F}\\*y');
+    assert.equal(fixText('\\*x \u{1F5D3}\u{FE0F}\\*y'), '\\*x \u{1F5D3}\u{FE0F}\\*y');
+    // A name with hyphens; escaped hyphens keep it text, however many there are.
+    assert.equal(fixText('Team :man-raising-hand: here'), 'Team \u{1F64B}\u{200D}\u{2642}\u{FE0F} here');
+    for (const text of ['Team :man\\-raising\\-hand: here', 'Team :man-raising\\-hand: here', 'Flag :flag\\-al: here']) {
+      assert.equal(fixText(text), text, text);
     }
   });
 
@@ -2452,4 +2489,35 @@ describe('Linear\'s content limit', () => {
       assert.equal(fixText(fixed), fixed, `a file over the limit is left as it is: ${tail}`);
     }
   });
+});
+
+// A file in fix's form that no one edits in Linear comes back unchanged:
+// Linear's export of it (as Linear writes it back) is no change from the
+// file, and its pull reads it back in fix's form.
+describe('a file in fix\'s form pulls back unchanged from Linear\'s export', () => {
+  const nbsp = '\u00a0';
+  const cases: Array<[string, string, string]> = [
+    // Linear writes text it holds without the escape of `+++` before text.
+    ['plus signs before text with a nested list', '1. Week\n   1. \\+++Plan\n      1. First step\n   2. Review', '1. Week\n   1. +++Plan\n      1. First step\n   2. Review'],
+    ['plus signs before text on a continuation line', 'Week\n\\+++Plan\nmore words', 'Week\n+++Plan\nmore words'],
+    // The same line escaped where blocks follow and plain where it ends its item.
+    ['a line written both ways', '1. Week\n   1. \\+++Plan 12\n      1. First step\n   2. +++Plan 12', '1. Week\n   1. +++Plan 12\n      1. First step\n   2. +++Plan 12'],
+    // Linear can write a section line that is an item's only text with an escape.
+    ['a section line as an item\'s only text', '1. Week\n2. +++ Tip words', '1. Week\n2. \\+++ Tip words'],
+    // Two signs are no section marker; Linear drops their escape.
+    ['two plus signs', '1. Week\n   1\\. \\++Plan 12', '1. Week\n   1\\. ++Plan 12'],
+    ['a number in bold and an entity', '1. Week\n   1. **12\\. Rent**\n   2. a -&gt; b', '1. Week\n   1. **12. Rent**\n   2. a -> b'],
+    // Linear drops the escape of a dash line indented past its item's text.
+    ['a dash line past the item\'s text', '1. Week\n   1. Total 12\n       \\-------\n       Rest', '1. Week\n   1. Total 12\n       -------\n       Rest'],
+    // Linear keeps a plus sign and a no-break space as text.
+    ['a plus line in an item', `* Week\n  * 3 apples\n    +${nbsp}\n  * \n* Done`, `* Week\n  * 3 apples\n    +${nbsp}\n  * \n* Done`],
+  ];
+  for (const [label, file, linear] of cases) {
+    it(label, () => {
+      assert.equal(fixText(file), file, 'fix leaves the file');
+      assert.deepEqual(lintText('a.md', file), [], 'lint finds nothing');
+      assert.ok(sameAsLinear(linear, file), 'the sync takes Linear\'s export as no change');
+      assert.deepEqual(lintText('a.md', fixLinearText(linear, linear, () => false, file)), [], 'a pull of it is lint clean');
+    });
+  }
 });

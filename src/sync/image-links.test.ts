@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { it, test } from 'node:test';
 import { readFileSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
-import { imageLinks, ImageRepairBudgetError } from './image-links.ts';
+import { imageLinks, ImageRepairBudgetError, webImageLinks } from './image-links.ts';
 import { parse, visit } from '../format/markdown.ts';
 import { fixText } from '../format/index.ts';
 
@@ -32,6 +32,16 @@ for (const [source, expected] of [
   ['![Chart][image]\n\n[image]: https://example.com/a.png', '[Chart](<https://example.com/a.png>)\n\n[image]: https://example.com/a.png'],
   ['`![Chart](../chart.png)`', '`![Chart](../chart.png)`'],
   ['![Chart](https://uploads.linear.app/chart.png)', '![Chart](https://uploads.linear.app/chart.png)'],
+  // A link left without text would be dropped by Linear: its alt text or URL becomes its text.
+  ['[![](data:image/png;base64,AAAA)](https://example.com/p)', '[https://example.com/p](https://example.com/p)'],
+  ['[![Dot](data:image/png;base64,AAAA)](https://example.com/p)', '[Dot](https://example.com/p)'],
+  ['[![]()][p]\n\n[p]: https://example.com/p', '[https://example.com/p][p]\n\n[p]: https://example.com/p'],
+  ['[Before ![]()](https://example.com/p)', '[Before ](https://example.com/p)'],
+  ['[*![]() more*](https://example.com/p)', '[* more*](https://example.com/p)'],
+  ['[![]()![b]()](https://example.com/p)', '[https://example.com/p](https://example.com/p)'],
+  ['[![]() ![b](https://example.com/b.png)](https://example.com/p)', '[ b](https://example.com/p)'],
+  ['| A |\n| -- |\n| [![x][i]](https://example.com/p) |\n\n[i]: <> "t"', '| A |\n| -- |\n| [x](https://example.com/p) |\n\n[i]: <> "t"'],
+  ['| A |\n| -- |\n| [![a\\|b]()](https://example.com/p) |', '| A |\n| -- |\n| [a&#124;b](https://example.com/p) |'],
 ]) it(`repairs pull Markdown: ${source}`, () => assert.equal(imageLinks(source!).body, expected));
 
 it('reports original image places and lines, including removed images', () => {
@@ -166,4 +176,35 @@ for (const [source, repaired] of [
   let links = 0;
   visit(parse(body), node => { if (node.type === 'link') links++; });
   assert.equal(links, 1, 'the repair is a link, not text');
+});
+
+// `fix` writes HTTP(S) images as links with the same rules, and changes nothing else.
+for (const [source, expected, lines] of [
+  ['![Chart](https://example.com/chart.png)', '[Chart](<https://example.com/chart.png>)', [1]],
+  ['Intro.\n\n![](HTTP://example.com/a.png)', 'Intro.\n\n[HTTP://example.com/a.png](<HTTP://example.com/a.png>)', [3]],
+  ['See ![Chart][c].\n\n[c]: https://example.com/c.png', 'See [Chart](<https://example.com/c.png>).\n\n[c]: https://example.com/c.png', [1]],
+  ['[![Build](https://example.com/badge.svg)](https://example.com/build)', '[Build](https://example.com/build)', [1]],
+  ['| A |\n| -- |\n| ![Cell](https://example.com/x.png) |', '| A |\n| -- |\n| [Cell](<https://example.com/x.png>) |', [3]],
+  ['![Upload](https://uploads.linear.app/a/b.png)', '[Upload](<https://uploads.linear.app/a/b.png>)', [1]],
+  ['![Web](https://example.com/w.png) and [Bad](javascript:alert%281%29)', '[Web](<https://example.com/w.png>) and [Bad](javascript:alert%281%29)', [1]],
+  ['![Dot](data:image/png;base64,AAAA) ![Web](https://example.com/w.png)', '![Dot](data:image/png;base64,AAAA) [Web](<https://example.com/w.png>)', [1]],
+  ['[![a\\]b](https://example.com/i.png)](https://example.com/p)', '[a\\]b](https://example.com/p)', [1]],
+  ['[![a\\]b](https://example.com/i.png)][r]\n\n[r]: https://example.com/p', '[a\\]b][r]\n\n[r]: https://example.com/p', [1]],
+] as const) it(`fix writes a web image as a link: ${JSON.stringify(source)}`, () => {
+  assert.deepEqual(webImageLinks(source), {body: expected, lines});
+});
+
+for (const source of [
+  '![Dot](data:image/png;base64,AAAA)',
+  '![Logo](/images/logo.png)',
+  '![Logo](//example.com/logo.png)',
+  '![Outside](../logo.png)',
+  '![Chart](chart.png)',
+  '![Undefined][none]',
+  '`![Chart](https://example.com/chart.png)`',
+  '[Web](https://example.com/page)',
+  '![Build](https://example.com/badge.svg "Release status")',
+  '![Build][b]\n\n[b]: https://example.com/badge.svg "Release status"',
+]) it(`fix keeps an image that is not on the web: ${JSON.stringify(source)}`, () => {
+  assert.equal(webImageLinks(source), undefined);
 });

@@ -7,18 +7,19 @@
 // findings. Neither stops at a rule whose construct `fix` writes in Linear's
 // form (FIXED_RULES).
 
-import type { BlockContent, Definition, DefinitionContent, Delete, Emphasis, Link, List, ListItem, Nodes, Paragraph, PhrasingContent, Root, RootContent, Strong, Table, TableRow, Text } from 'mdast';
+import type { BlockContent, Definition, DefinitionContent, Delete, Emphasis, Link, LinkReference, List, ListItem, Nodes, Paragraph, PhrasingContent, Root, RootContent, Strong, Table, TableRow, Text } from 'mdast';
 import { isDeepStrictEqual } from 'node:util';
 import { decodeNamedCharacterReference } from 'decode-named-character-reference';
-import { nameToEmoji } from 'gemoji';
+import { LINEAR_EMOJI } from './linear-emoji.ts';
+import { emojiShortcodes, escaped, sameFlanking } from './shortcodes.ts';
 import { normalizeUri } from 'micromark-util-sanitize-uri';
 import { findMarkerLines } from '../merge/markers.ts';
 import { lintText, overContentLimit, paddingOverLimit, referencesOverLimit } from './lint.ts';
 import { CONTENT_LIMIT, FIXED_RULES, IMAGE_PLACE_RULES, type Finding } from './rules.ts';
 import { plusLinesAsLinear } from './marker-lines.ts';
-import { plusSectionsAsLinear, sectionOpenersAsLinear } from './sections.ts';
+import { plusSectionsAsLinear, plusTextAsText, sectionOpenersAsLinear } from './sections.ts';
 import { tabReferences } from './tab-reference.ts';
-import { ALERT, LINKED_BOLD_ITALIC_SUFFIX, MarkdownLimitError, advanceColumn, bracketedLabel, codeSpans, decodedDestinationPath, end, hasOuterStars, imageDestination, isCallout, isCalloutComment, joinFile, codeSpanText, linearDropsCodeSpaces, linearMarkersAsText, linkDestination, listKind, listParts, nestedFileBlocksOnItemLine, nestsMarkerText, opensWithText, parse, quoteLines, sameMarkdown, splitFile, start, visit, withoutTrailingNewlines, endingRow } from './markdown.ts';
+import { ALERT, LINKED_BOLD_ITALIC_SUFFIX, MarkdownLimitError, advanceColumn, bracketedLabel, codeSpans, decodedDestinationPath, end, hasOuterStars, imageDestination, isCallout, isCalloutComment, joinFile, codeSpanText, line, lineCount, linearDropsCodeSpaces, linearMarkersAsText, linkDestination, listKind, listParts, nestedFileBlocksOnItemLine, nestsMarkerText, opensWithText, parse, quoteLines, sameMarkdown, splitFile, start, visit, withoutTrailingNewlines, endingRow } from './markdown.ts';
 
 export { imageDestination, linkDestination } from './markdown.ts';
 
@@ -52,37 +53,112 @@ interface WriterOptions extends FixOptions {
  * the source.
  */
 export function fixText(text: string, options: FixOptions = {}): string {
-  if (lintText('', text, { linearExport: options.linearExport === true }).some(stopsFix)) return text;
+  return linearForm(text, options) ?? text;
+}
+
+/** The text in Linear's form, or undefined when `fixText` leaves it to its author. */
+export function linearForm(text: string, options: FixOptions = {}): string | undefined {
+  if (lintText('', text, { linearExport: options.linearExport === true }).some(stopsFix)) return undefined;
   const { head, body } = splitFile(text);
   const normalized = tabReferences(body.replace(/\r\n?/g, '\n')).text;
   // Tables end first: a section marker on a line they give up is a marker.
-  const ended = tablesEndAsLinear(normalized);
+  // A link without text gets its URL after that, in the blocks the table gives up too.
+  const ended = emptyLinksAsUrls(tablesEndAsLinear(normalized));
   // The lines a table gives up can form blocks lint has not seen (a table
   // whose header has no pipe): lint them as written.
-  if (ended !== normalized && lintText('', ended, { linearExport: options.linearExport === true }).some(stopsFix)) return text;
-  const sections = sectionOpenersAsLinear(ended);
-  const lf = sections === ended ? plusSectionsAsLinear(sections) : sections;
-  if (lf === undefined) return text;
+  if (ended !== normalized && lintText('', ended, { linearExport: options.linearExport === true }).some(stopsFix)) return undefined;
+  // Plus signs with text right after them are text: escaped, they can join
+  // the lines after them into one paragraph, which can read another way.
+  const plain = plusTextAsText(ended);
+  if (plain !== ended && lintText('', plain, { linearExport: options.linearExport === true }).some(stopsFix)) return undefined;
+  const sections = sectionOpenersAsLinear(plain);
+  const lf = sections === plain ? plusSectionsAsLinear(sections) : sections;
+  if (lf === undefined) return undefined;
   const broken = backslashBreaksAsLinear(lf);
-  if (broken === undefined) return text;
+  if (broken === undefined) return undefined;
   const { body: unbroken, lines: breakLines } = broken;
   const fixed = fixBody(unbroken, { ...options, breakLines });
-  if (fixed === undefined) return text;
+  if (fixed === undefined) return undefined;
   // The writer can still lose a line ending of a former break (text split
   // off at an image is trimmed, a lazy line given its prefix can open a
   // block): such a file stays with its author.
-  if (unbroken !== lf && lineEndings(fixed) < lineEndings(unbroken)) return text;
+  if (unbroken !== lf && lineEndings(fixed) < lineEndings(unbroken)) return undefined;
   // Text split off at an image can be a paragraph of only a number (`3\.`),
   // which Linear writes back as an empty item (`number-paragraph`).
-  if (NUMBER_PARAGRAPH_LINE.test(fixed) && lintText('', fixed).some((finding) => finding.rule === 'number-paragraph')) return text;
+  if (NUMBER_PARAGRAPH_LINE.test(fixed) && lintText('', fixed).some((finding) => finding.rule === 'number-paragraph')) return undefined;
   // A section that ends an empty item's text, as Linear writes it, can close
   // right above a list numbered other than 1, which Linear writes on the next
   // line, where Markdown reads it as text (`list-after-item-text`).
-  if (lf !== ended && lintText('', fixed, { linearExport: options.linearExport === true }).some((finding) => finding.rule === 'list-after-item-text')) return text;
+  if (lf !== plain && lintText('', fixed, { linearExport: options.linearExport === true }).some((finding) => finding.rule === 'list-after-item-text')) return undefined;
   // After the rest: a lone plus sign can also reach an item's second line
   // when the item's text moves onto its marker line or a code span is joined.
   // Linear's own export is captured as it is: the no-break space is a character.
   return joinFile(head, options.linearExport === true ? fixed : plusLinesAsLinear(fixed));
+}
+
+/**
+ * The body with the URL of each link without text written as its text
+ * (`link-without-text`): Linear drops such a link, and its URL with it.
+ * A link without a URL stays as it is, and so does every link when the
+ * text would read as other Markdown (a `|` in a table cell): lint still
+ * reports them, for their author.
+ */
+function emptyLinksAsUrls(body: string): string {
+  // An empty label followed by a destination or a reference label.
+  if (!/\[\][([]/.test(body)) return body;
+  const tree = parse(body);
+  const edits: { at: number; text: string }[] = [];
+  for (const { node, url } of emptyLinksWithUrl(tree, body)) {
+    node.children = [{ type: 'text', value: url }];
+    // Escaped as `fix` writes the URL of an autolink as its label: nothing in it reads as syntax or a shortcode.
+    let text = '';
+    let at = 0;
+    for (const edit of literalEdits(url, 0, url.length)) {
+      text += url.slice(at, edit.from) + edit.text;
+      at = edit.to;
+    }
+    edits.push({ at: start(node) + 1, text: text + url.slice(at) });
+  }
+  if (edits.length === 0) return body;
+  let written = '';
+  let from = 0;
+  for (const { at, text } of edits.sort((a, b) => a.at - b.at)) {
+    written += body.slice(from, at) + text;
+    from = at;
+  }
+  written += body.slice(from);
+  // Each link reads its URL as its text, and nothing else changes.
+  return isDeepStrictEqual(withoutPositions(parse(written)), withoutPositions(tree)) ? written : body;
+}
+
+/** The links without text that have a URL, as `emptyLinksAsUrls` fills them, in document order. */
+function emptyLinksWithUrl(tree: Root, body: string): Array<{ node: Link | LinkReference; url: string }> {
+  const definitions = new Map<string, string>();
+  visit(tree, (node) => { if (node.type === 'definition' && !definitions.has(node.identifier)) definitions.set(node.identifier, node.url); });
+  const found: Array<{ node: Link | LinkReference; url: string }> = [];
+  visit(tree, (node) => {
+    if ((node.type !== 'link' && node.type !== 'linkReference') || node.children.length > 0) return;
+    const url = node.type === 'link' ? node.url : definitions.get(node.identifier) ?? '';
+    // An autolink always has text; a label here is `[]`, so the text goes between the brackets.
+    if (url !== '' && body.slice(start(node), start(node) + 2) === '[]') found.push({ node, url });
+  });
+  return found;
+}
+
+/**
+ * The lines (1-based, front matter included) of the links without text
+ * that have a URL, one per line: the links `fix` gives their URL as text.
+ */
+export function emptyLinkLines(text: string): number[] {
+  const { head, body } = splitFile(text);
+  if (!/\[\][([]/.test(body)) return [];
+  const offset = lineCount(head);
+  return [...new Set(emptyLinksWithUrl(parse(body), body).map(({ node }) => line(node) + offset))];
+}
+
+function withoutPositions(node: Nodes): unknown {
+  const { position: _position, ...rest } = node;
+  return 'children' in node ? { ...rest, children: (node.children as Nodes[]).map(withoutPositions) } : rest;
 }
 
 /** Lint findings that leave a file to its author. */
@@ -210,7 +286,11 @@ function fixBody(body: string, bodyOptions: WriterOptions): string | undefined {
   // A rewrite can expose another (an inline image leaves its paragraph):
   // repeat until the text no longer changes.
   for (let pass = 0; pass < 5; pass++) {
-    const source = pass === 0 ? current : plusSectionsAsLinear(current);
+    // A rewrite can expose plus signs with text right after them: their
+    // escape can join the lines below, so lint that before going on.
+    const plain = pass === 0 ? current : plusTextAsText(current);
+    if (plain !== current && lintText('', plain, { linearExport: bodyOptions.linearExport === true }).some(stopsFix)) return undefined;
+    const source = pass === 0 ? current : plusSectionsAsLinear(plain);
     // A later pass writes the text the first one wrote: its break lines are written.
     const { breakLines: _written, ...rest } = bodyOptions;
     const options: WriterOptions = pass === 0 ? bodyOptions : rest;
@@ -1037,8 +1117,11 @@ class Writer {
         const escape = header ? headerCellEscape(text) : unicodeSpaceLead(inline.replace(/^[ \t]+/, '')) === 0 ? undefined : headingOrNumberEscape(text.slice(lead));
         if (escape !== undefined) text = `${text.slice(0, lead + escape)}\\${text.slice(lead + escape)}`;
         // Linear escapes a dash that starts a cell's text (`\-1.5`); a dash
-        // before a space is a list there, which lint reports.
-        else if (text.startsWith('-')) text = `\\${text}`;
+        // before a space is a list there, which lint reports. A `>` that
+        // starts a body cell is a quote there (`table-quote-cell`), and
+        // Linear writes a literal one as `\>`, the escape a header cell gets;
+        // in Linear's own export a bare one is its quote, kept as written.
+        else if (text.startsWith('-') || (text.startsWith('>') && !this.options.linearExport)) text = `\\${text}`;
         // Linear holds a body cell of only a number and a dot as an empty
         // ordered list and writes the space after its marker.
         if (!header && /^\d{1,9}\.$/.test(text)) text += ' ';
@@ -2041,14 +2124,19 @@ function textEdits(source: string, from: number, to: number, redundantEscape: (a
     if (!sameFlanking(source, at, at + match[0].length, char)) continue;
     edits.push({ from: at, to: at + match[0].length, text: char });
   }
-  // `:name:` shortcodes Linear knows become the emoji, unless the first colon is escaped.
+  // `:name:` shortcodes Linear knows become the emoji, unless the first colon
+  // is escaped or the emoji would change how an emphasis run next to it reads.
   for (const { index, length, emoji } of emojiShortcodes(raw)) {
-    if (!escaped(raw, index)) edits.push({ from: from + index, to: from + index + length, text: emoji });
+    const at = from + index;
+    if (!escaped(raw, index) && sameFlanking(source, at, at + length, emoji)) edits.push({ from: at, to: at + length, text: emoji });
   }
   // Keep escapes that would expose a shortcode on the next formatting pass.
   const shortcodeEscapes = new Set<number>();
-  for (const match of raw.matchAll(/:(?=([a-z0-9_+-]*)\\([+-][a-z0-9_+-]*):)/g)) {
-    if (Object.hasOwn(nameToEmoji, match[1]! + match[2]!)) shortcodeEscapes.add(match.index + 1 + match[1]!.length);
+  // A name can hold several escaped `+` or `-` (`:man\-raising\-hand:`); all of them stay.
+  for (const match of raw.matchAll(/:(?=((?:[a-z0-9_+-]|\\[+-])*\\[+-](?:[a-z0-9_+-]|\\[+-])*):)/g)) {
+    const name = match[1]!;
+    if (!LINEAR_EMOJI.has(name.replace(/\\([+-])/g, '$1'))) continue;
+    for (const escape of name.matchAll(/\\/g)) shortcodeEscapes.add(match.index + 1 + escape.index);
   }
   // A backslash before a letter is a literal backslash; Linear doubles it,
   // as it does one that ends its line (where it breaks no line: a block's
@@ -2095,7 +2183,7 @@ function tildeUnderscoreEdits(raw: string, from: number): Edit[] {
   const text = chars.map(({ char }) => char).join('');
   const shortcode = new Set<number>();
   for (const match of text.matchAll(/:(?=([a-z0-9_+-]+):)/g)) {
-    if (Object.hasOwn(nameToEmoji, match[1]!)) for (let index = match.index; index < match.index + match[1]!.length + 2; index++) shortcode.add(index);
+    if (LINEAR_EMOJI.has(match[1]!)) for (let index = match.index; index < match.index + match[1]!.length + 2; index++) shortcode.add(index);
   }
   const edits: Edit[] = [];
   chars.forEach(({ char, at, backslash }, index) => {
@@ -2189,7 +2277,7 @@ function plainUrlUnderscores(label: string): string {
 /** Label shortcodes can share a colon, as in `:fire:tada:`. */
 function* emojiShortcodeStarts(label: string): Generator<number> {
   for (const match of label.matchAll(/:(?=([a-z0-9_+-]+):)/g)) {
-    if (Object.hasOwn(nameToEmoji, match[1]!)) yield match.index;
+    if (LINEAR_EMOJI.has(match[1]!)) yield match.index;
   }
 }
 
@@ -2313,76 +2401,10 @@ function spaceReferenceRuns(source: string, from: number, to: number, wide = fal
   }
   return runs;
 }
-const DELIMITER = /^[*_~]$/;
-// As the parser reads it: a line or paragraph separator and a byte order mark count too.
-const UNICODE_WHITESPACE = /^\s$/u;
-const UNICODE_PUNCTUATION = /^[\p{P}\p{S}]$/u;
-
-/**
- * Whether the delimiter runs right before `from` and right after `to` (a
- * reference) can open and close the same way when the reference is `char`.
- */
-function sameFlanking(source: string, from: number, to: number, char: string): boolean {
-  const kind = (c: string | undefined) => (c === undefined || UNICODE_WHITESPACE.test(c) ? 'space' : UNICODE_PUNCTUATION.test(c) ? 'punctuation' : 'other');
-  // Whether a run of `delimiter` between `before` and `after` can open and close.
-  const reads = (delimiter: string, before: string | undefined, after: string | undefined): string => {
-    const b = kind(before);
-    const a = kind(after);
-    const left = a !== 'space' && (a !== 'punctuation' || b !== 'other');
-    const right = b !== 'space' && (b !== 'punctuation' || a !== 'other');
-    if (delimiter !== '_') return `${left} ${right}`;
-    return `${left && (!right || b === 'punctuation')} ${right && (!left || a === 'punctuation')}`;
-  };
-  const delimiterBefore = source[from - 1];
-  if (delimiterBefore !== undefined && DELIMITER.test(delimiterBefore)) {
-    let start = from - 1;
-    while (start > 0 && source[start - 1] === delimiterBefore) start--;
-    if (reads(delimiterBefore, codePointBefore(source, start), source[from]) !== reads(delimiterBefore, codePointBefore(source, start), char)) return false;
-  }
-  const delimiterAfter = source[to];
-  if (delimiterAfter !== undefined && DELIMITER.test(delimiterAfter)) {
-    let end = to + 1;
-    while (end < source.length && source[end] === delimiterAfter) end++;
-    if (reads(delimiterAfter, source[to - 1], codePointAt(source, end)) !== reads(delimiterAfter, char, codePointAt(source, end))) return false;
-  }
-  return true;
-}
-
-/** The whole character that ends right before `at`: an emoji is two UTF-16 units. */
-function codePointBefore(source: string, at: number): string | undefined {
-  if (at <= 0) return undefined;
-  const low = source.charCodeAt(at - 1);
-  if (low >= 0xdc00 && low <= 0xdfff && at >= 2) {
-    const high = source.charCodeAt(at - 2);
-    if (high >= 0xd800 && high <= 0xdbff) return source.slice(at - 2, at);
-  }
-  return source[at - 1];
-}
-
-/** The whole character that starts at `at`. */
-function codePointAt(source: string, at: number): string | undefined {
-  const code = source.codePointAt(at);
-  return code === undefined ? undefined : String.fromCodePoint(code);
-}
-
 /** A character reference as Markdown spells one; whether it names a character is decided apart. */
 const CHARACTER_REFERENCE = /&(?:#[0-9]{1,7}|#[xX][0-9a-fA-F]{1,6}|[A-Za-z][A-Za-z0-9]{1,31});/g;
 const ASTERISK_SPELLING = new RegExp(String.raw`\\.|[*]|` + CHARACTER_REFERENCE.source, 'g');
 
-/** The `:name:` shortcodes in `raw` that name an emoji Linear knows, with their offsets. */
-function* emojiShortcodes(raw: string): Generator<{ index: number; length: number; emoji: string }> {
-  for (const match of raw.matchAll(/:([a-z0-9_+-]+):/g)) {
-    const emoji = Object.hasOwn(nameToEmoji, match[1]!) ? nameToEmoji[match[1]!] : undefined;
-    if (emoji) yield { index: match.index, length: match[0].length, emoji };
-  }
-}
-
-/** Whether the character at `at` follows an odd run of backslashes, which escapes it. */
-function escaped(text: string, at: number): boolean {
-  let run = 0;
-  while (text[at - 1 - run] === '\\') run++;
-  return run % 2 === 1;
-}
 
 /**
  * A part of a paragraph split off at an image, which becomes a paragraph of
@@ -2551,7 +2573,7 @@ export function fixLinearText(linearText: string, content: string, inRepository:
   const uploaded = (url: string): boolean => !notUploadedUris.has(normalizeUri(url));
   const linear = { linkedFileExists: uploaded, linearExport: true };
   const fixed = fixText(text, linear);
-  if (fixed !== text && !sameMarkdown(splitFile(fixed).body, splitFile(text).body, { linearNumberSpacing: true, linearBoldForms: true })) return text;
+  if (fixed !== text && !sameMarkdown(splitFile(fixed).body, splitFile(text).body, { linearNumberSpacing: true, linearBoldForms: true, linearShortcodes: true })) return text;
   // The hook cannot tell which files were uploaded. It can write a list item
   // holding only a link to a repository file as a file block. Linear stores
   // such a block as a link if it holds no upload for the file. Take the
