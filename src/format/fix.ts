@@ -7,7 +7,7 @@
 // findings. Neither stops at a rule whose construct `fix` writes in Linear's
 // form (FIXED_RULES).
 
-import type { BlockContent, Definition, DefinitionContent, Delete, Emphasis, Link, List, ListItem, Nodes, Paragraph, PhrasingContent, Root, RootContent, Strong, Table, TableRow, Text } from 'mdast';
+import type { BlockContent, Definition, DefinitionContent, Delete, Emphasis, Link, LinkReference, List, ListItem, Nodes, Paragraph, PhrasingContent, Root, RootContent, Strong, Table, TableRow, Text } from 'mdast';
 import { isDeepStrictEqual } from 'node:util';
 import { decodeNamedCharacterReference } from 'decode-named-character-reference';
 import { LINEAR_EMOJI } from './linear-emoji.ts';
@@ -18,7 +18,7 @@ import { CONTENT_LIMIT, FIXED_RULES, IMAGE_PLACE_RULES, type Finding } from './r
 import { plusLinesAsLinear } from './marker-lines.ts';
 import { plusSectionsAsLinear, sectionOpenersAsLinear } from './sections.ts';
 import { tabReferences } from './tab-reference.ts';
-import { ALERT, LINKED_BOLD_ITALIC_SUFFIX, MarkdownLimitError, advanceColumn, bracketedLabel, codeSpans, decodedDestinationPath, end, hasOuterStars, imageDestination, isCallout, isCalloutComment, joinFile, codeSpanText, linearDropsCodeSpaces, linearMarkersAsText, linkDestination, listKind, listParts, nestedFileBlocksOnItemLine, nestsMarkerText, opensWithText, parse, quoteLines, sameMarkdown, splitFile, start, visit, withoutTrailingNewlines, endingRow } from './markdown.ts';
+import { ALERT, LINKED_BOLD_ITALIC_SUFFIX, MarkdownLimitError, advanceColumn, bracketedLabel, codeSpans, decodedDestinationPath, end, hasOuterStars, imageDestination, isCallout, isCalloutComment, joinFile, codeSpanText, line, lineCount, linearDropsCodeSpaces, linearMarkersAsText, linkDestination, listKind, listParts, nestedFileBlocksOnItemLine, nestsMarkerText, opensWithText, parse, quoteLines, sameMarkdown, splitFile, start, visit, withoutTrailingNewlines, endingRow } from './markdown.ts';
 
 export { imageDestination, linkDestination } from './markdown.ts';
 
@@ -61,7 +61,8 @@ export function linearForm(text: string, options: FixOptions = {}): string | und
   const { head, body } = splitFile(text);
   const normalized = tabReferences(body.replace(/\r\n?/g, '\n')).text;
   // Tables end first: a section marker on a line they give up is a marker.
-  const ended = tablesEndAsLinear(normalized);
+  // A link without text gets its URL after that, in the blocks the table gives up too.
+  const ended = emptyLinksAsUrls(tablesEndAsLinear(normalized));
   // The lines a table gives up can form blocks lint has not seen (a table
   // whose header has no pipe): lint them as written.
   if (ended !== normalized && lintText('', ended, { linearExport: options.linearExport === true }).some(stopsFix)) return undefined;
@@ -88,6 +89,71 @@ export function linearForm(text: string, options: FixOptions = {}): string | und
   // when the item's text moves onto its marker line or a code span is joined.
   // Linear's own export is captured as it is: the no-break space is a character.
   return joinFile(head, options.linearExport === true ? fixed : plusLinesAsLinear(fixed));
+}
+
+/**
+ * The body with the URL of each link without text written as its text
+ * (`link-without-text`): Linear drops such a link, and its URL with it.
+ * A link without a URL stays as it is, and so does every link when the
+ * text would read as other Markdown (a `|` in a table cell): lint still
+ * reports them, for their author.
+ */
+function emptyLinksAsUrls(body: string): string {
+  // An empty label followed by a destination or a reference label.
+  if (!/\[\][([]/.test(body)) return body;
+  const tree = parse(body);
+  const edits: { at: number; text: string }[] = [];
+  for (const { node, url } of emptyLinksWithUrl(tree, body)) {
+    node.children = [{ type: 'text', value: url }];
+    // Escaped as `fix` writes the URL of an autolink as its label: nothing in it reads as syntax or a shortcode.
+    let text = '';
+    let at = 0;
+    for (const edit of literalEdits(url, 0, url.length)) {
+      text += url.slice(at, edit.from) + edit.text;
+      at = edit.to;
+    }
+    edits.push({ at: start(node) + 1, text: text + url.slice(at) });
+  }
+  if (edits.length === 0) return body;
+  let written = '';
+  let from = 0;
+  for (const { at, text } of edits.sort((a, b) => a.at - b.at)) {
+    written += body.slice(from, at) + text;
+    from = at;
+  }
+  written += body.slice(from);
+  // Each link reads its URL as its text, and nothing else changes.
+  return isDeepStrictEqual(withoutPositions(parse(written)), withoutPositions(tree)) ? written : body;
+}
+
+/** The links without text that have a URL, as `emptyLinksAsUrls` fills them, in document order. */
+function emptyLinksWithUrl(tree: Root, body: string): Array<{ node: Link | LinkReference; url: string }> {
+  const definitions = new Map<string, string>();
+  visit(tree, (node) => { if (node.type === 'definition' && !definitions.has(node.identifier)) definitions.set(node.identifier, node.url); });
+  const found: Array<{ node: Link | LinkReference; url: string }> = [];
+  visit(tree, (node) => {
+    if ((node.type !== 'link' && node.type !== 'linkReference') || node.children.length > 0) return;
+    const url = node.type === 'link' ? node.url : definitions.get(node.identifier) ?? '';
+    // An autolink always has text; a label here is `[]`, so the text goes between the brackets.
+    if (url !== '' && body.slice(start(node), start(node) + 2) === '[]') found.push({ node, url });
+  });
+  return found;
+}
+
+/**
+ * The lines (1-based, front matter included) of the links without text
+ * that have a URL, one per line: the links `fix` gives their URL as text.
+ */
+export function emptyLinkLines(text: string): number[] {
+  const { head, body } = splitFile(text);
+  if (!/\[\][([]/.test(body)) return [];
+  const offset = lineCount(head);
+  return [...new Set(emptyLinksWithUrl(parse(body), body).map(({ node }) => line(node) + offset))];
+}
+
+function withoutPositions(node: Nodes): unknown {
+  const { position: _position, ...rest } = node;
+  return 'children' in node ? { ...rest, children: (node.children as Nodes[]).map(withoutPositions) } : rest;
 }
 
 /** Lint findings that leave a file to its author. */

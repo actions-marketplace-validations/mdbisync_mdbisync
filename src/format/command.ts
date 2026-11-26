@@ -3,7 +3,7 @@
 
 import { closeSync, constants, existsSync, fstatSync, ftruncateSync, lstatSync, openSync, readdirSync, readFileSync, readlinkSync, realpathSync, statSync, writeSync, type Stats } from 'node:fs';
 import { basename, join, relative, resolve, sep } from 'node:path';
-import { fixText, linearForm, type FixOptions } from './fix.ts';
+import { emptyLinkLines, fixText, linearForm, type FixOptions } from './fix.ts';
 import { duplicateTitles, linkedFileCheck, lintText } from './lint.ts';
 import { lineCount, MarkdownLimitError, splitFile } from './markdown.ts';
 import { listTextWarnings } from './list-text.ts';
@@ -213,7 +213,8 @@ function lint(paths: readonly string[], cwd: string): CommandResult {
 /**
  * `fix`: rewrites files into Linear's form; exit 1 when a file changed or lint
  * found a problem `fix` leaves to the author. An image from an HTTP(S) URL
- * becomes a link, with a warning. The warnings of the files, as written, are
+ * becomes a link, and a link without text gets its URL as the text, each
+ * with a warning. The warnings of the files, as written, are
  * printed too, but alone they exit 0.
  */
 export function runFix(paths: readonly string[], cwd: string = process.cwd()): CommandResult {
@@ -248,7 +249,8 @@ function fix(paths: readonly string[], cwd: string): CommandResult {
   }
   const changed: string[] = [];
   const moved: string[] = [];
-  const imageLinks: Warning[] = [];
+  const madeLinks: Warning[] = [];
+  const madeLines = new Map<string, { imageLines: number[]; textLines: number[] }>();
   for (const file of files) {
     if (failing.has(file)) continue;
     const outcome = fixFile(file, cwd);
@@ -256,18 +258,27 @@ function fix(paths: readonly string[], cwd: string): CommandResult {
     else if (outcome === 'moved') moved.push(file);
     else if (outcome !== 'unchanged') {
       changed.push(file);
-      for (const line of outcome.imageLines) imageLinks.push({ file, line, rule: 'image-made-link', message: LINT_WARNINGS['image-made-link'] });
+      madeLines.set(file, outcome);
     }
   }
   // The rewritten files are linted again: their earlier findings were only
   // ones `fix` writes in Linear's form, and what is left of them is reported.
   const rewritten = new Set(changed);
-  const findings = [...before.filter((finding) => !rewritten.has(finding.file)), ...lintAll(changed, cwd)];
+  const after = lintAll(changed, cwd);
+  const findings = [...before.filter((finding) => !rewritten.has(finding.file)), ...after];
+  for (const file of changed) {
+    const { imageLines, textLines } = madeLines.get(file)!;
+    const made: Warning[] = [
+      ...imageLines.map((line) => ({ file, line, rule: 'image-made-link' as const, message: LINT_WARNINGS['image-made-link'] })),
+      ...textLines.map((line) => ({ file, line, rule: 'link-text-from-url' as const, message: LINT_WARNINGS['link-text-from-url'] })),
+    ];
+    madeLinks.push(...made.sort((a, b) => a.line - b.line));
+  }
   const stdout = changed.map((file) => `${lineText(file)}: fixed\n`).join('')
     + moved.map((file) => `${lineText(file)}: moved while fix ran; left unchanged\n`).join('')
     + describe(findings);
   const kept = new Set(moved);
-  return { exitCode: stdout === '' ? 0 : 1, stdout: stdout + describeWarnings(imageLinks) + warnings(files.filter((file) => !kept.has(file)), cwd), stderr: '' };
+  return { exitCode: stdout === '' ? 0 : 1, stdout: stdout + describeWarnings(madeLinks) + warnings(files.filter((file) => !kept.has(file)), cwd), stderr: '' };
 }
 
 /**
@@ -293,7 +304,7 @@ function withEscapedErrors(command: () => CommandResult): CommandResult {
  * link after the search cannot redirect the write; such a file is 'moved'.
  * A file that needs no change is only read, so it may be read-only.
  */
-function fixFile(file: string, cwd: string): { imageLines: number[] } | 'unchanged' | 'complex' | 'moved' {
+function fixFile(file: string, cwd: string): { imageLines: number[]; textLines: number[] } | 'unchanged' | 'complex' | 'moved' {
   const path = join(cwd, file);
   const reader = openOwnFile(path, constants.O_RDONLY);
   if (reader === undefined) return 'moved';
@@ -321,7 +332,9 @@ function fixFile(file: string, cwd: string): { imageLines: number[] } | 'unchang
     const bytes = Buffer.from(fixed, 'utf8');
     ftruncateSync(writer, 0);
     for (let written = 0; written < bytes.length;) written += writeSync(writer, bytes, written, bytes.length - written, written);
-    return { imageLines: linked?.lines ?? [] };
+    // `fix` gives every link without text that has a URL its URL, or none (`emptyLinksAsUrls`).
+    const textLines = emptyLinkLines(fixed).length === 0 ? emptyLinkLines(text) : [];
+    return { imageLines: linked?.lines ?? [], textLines };
   } finally {
     closeSync(writer);
   }
