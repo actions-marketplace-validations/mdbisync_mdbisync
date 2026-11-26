@@ -30,6 +30,7 @@ import { fixText, joinFile, sameAsLinear, splitFile } from '../format/index.ts';
 import {
   DocumentTooLongError,
   type LinearDocument,
+  LinearCreateEditedError,
   LinearError,
   LinearReadBackError,
   LinearStoppedError,
@@ -51,6 +52,7 @@ import {
   readInitialSyncProgress,
   readReservedIds,
   readWrittenHashes,
+  readWrittenMacs,
   commitTree,
   commitUploads,
   pushAtomic,
@@ -234,6 +236,17 @@ export async function confirmInitialSync(context: RunContext, options: ConfirmOp
   /** What the stopped run sent, by path, when this run resumes it; and what this run has sent. */
   const writtenBefore = resumed ? await readWrittenHashes(git, expected.ids) : new Map<string, string>();
   const sentHashes = new Map(writtenBefore);
+  // The receipts live in a ref anyone who may push can rewrite: a resumed run trusts what Linear returned to the
+  // stopped run only for a receipt the sync signed, for this document, this text and that digest.
+  const writtenMacs = resumed ? await readWrittenMacs(git, expected.ids) : new Map<string, string>();
+  const signedBefore = (path: string): boolean => {
+    const entry = previous.get(path);
+    const hash = writtenBefore.get(path);
+    return entry?.observedDigest !== undefined && hash !== undefined
+      && context.pushedKey.verifiesWritten(path, entry.id, hash, entry.observedDigest, writtenMacs.get(path));
+  };
+  /** The paths whose write receipt the sync signs: its own writes, and the stopped run's it checked. */
+  const vouched = new Set([...writtenBefore.keys()].filter(signedBefore));
   const ids: IdMap = resumed ? new Map(previous) : new Map();
   const uploads = await readUploads(git, expected.uploads, context.pushedKey);
   const uploadsAtStart = uploads.size;
@@ -280,10 +293,16 @@ export async function confirmInitialSync(context: RunContext, options: ConfirmOp
   let uploadsPushed = uploads.size;
   const pushProgress = async () => {
     const updates: RefUpdate[] = [];
+    const macs = new Map<string, string>();
+    for (const [path, hash] of sentHashes) {
+      const entry = ids.get(path);
+      if (vouched.has(path) && entry?.observedDigest !== undefined) macs.set(path, context.pushedKey.writtenMac(path, entry.id, hash, entry.observedDigest));
+    }
     const idsCommit = await commitIds(git, expected.ids, ids, identity, {
       message: initialSyncProgressMessage(fetched.tracked),
       always: true,
       written: sentHashes,
+      writtenMacs: macs,
     });
     updates.push({ ref: stateRef(options.config, 'ids'), expected: expected.ids, next: idsCommit });
     if (uploads.size !== uploadsAtStart || expected.uploads !== null) {
@@ -337,6 +356,8 @@ export async function confirmInitialSync(context: RunContext, options: ConfirmOp
 
   /** Titles, by place, of an overwrite left out as changed: no document of them is trashed. */
   const skippedTitles = new Set<string>();
+  /** Paths whose document a stopped run created and this resumed run leaves out: their ids stay reserved like a new document's. */
+  const createdBefore = new Set<string>();
   const titleKey = (place: Place, title: string) => `${placeKey(place)}\0${title.normalize('NFC')}`;
   const work: Work[] = [
     ...plan.overwrite.map((entry): Work => ({ kind: 'overwrite', entry })),
@@ -404,21 +425,25 @@ export async function confirmInitialSync(context: RunContext, options: ConfirmOp
         // That inverse comparison alone also accepts seeded relative links:
         // require stored destinations to match what was sent before using it.
         // Computed once, and only when asked: a resumed run skips most documents on the digest alone.
+        const holdsText = (content: string) => holdsBody(content, body) || (
+          sameLinkDestinations(content, body)
+          && holdsBody(fixText(restoreBody(transforms, path, content, body, sources.input.mapping.files), { linearExport: true }), source)
+        );
         let held: boolean | undefined;
-        const holds = () => (held ??= document !== undefined && (holdsBody(document.content ?? '', body) || (
-          sameLinkDestinations(document.content ?? '', body)
-          && holdsBody(fixText(restoreBody(transforms, path, document.content ?? '', body, sources.input.mapping.files), { linearExport: true }), source)
-        )));
+        const holds = () => (held ??= document !== undefined && holdsText(document.content ?? ''));
         // A resumed run skips what the stopped run wrote, as long as the text
         // to send is the same and the document still holds what was written:
-        // as Linear returned it to the stopped run, or the body itself. A
-        // document edited since the stop is written again, so its text is
-        // never recorded unchecked; a file changed since is written again too.
+        // as Linear returned it to the stopped run, by a receipt the sync
+        // signed, or the body itself. A document edited since the stop is
+        // written again, so its text is never recorded unchecked; a file
+        // changed since is written again too, and so is a document whose
+        // receipt is not the sync's own and that does not hold the body.
         const before = previous.get(path);
         if (document !== undefined && resumed && before?.id === document.id && writtenBefore.get(path) === hash
-          && ((before.observedDigest !== undefined && observedDigest(document) === before.observedDigest) || holds())) {
+          && ((signedBefore(path) && observedDigest(document) === before.observedDigest) || holds())) {
           result.skippedCompleted.push(path);
           sentHashes.set(path, hash);
+          vouched.add(path);
           remember(path, document);
           // The stopped run may have stopped between the write and the mark.
           await reconcileMark(path, document, hash);
@@ -429,8 +454,18 @@ export async function confirmInitialSync(context: RunContext, options: ConfirmOp
           // A write receipt of the stopped run is for another text: kept next to this document's digest, a
           // resume after the file goes back to that text would skip the document while it holds this one.
           sentHashes.delete(path);
+          vouched.delete(path);
           remember(path, document);
           await reconcileMark(path, document, hash);
+          continue;
+        }
+        // The stopped run chose this document's id for the path and created it, but never recorded what it holds:
+        // its lost answer was read back edited, or the read-back failed. Text other than the body is someone's edit
+        // since, so it is left out as when the stopped run saw it, never overwritten.
+        if (document !== undefined && resumed && before?.id === document.id && before.observedDigest === undefined && !writtenBefore.has(path)) {
+          result.leftOutAtWrite.push({ path, rule: 'changed-during-run' });
+          skippedTitles.add(titleKey(item.entry.place, item.entry.title));
+          createdBefore.add(path);
           continue;
         }
         if (!beforeWriteReached) {
@@ -441,9 +476,10 @@ export async function confirmInitialSync(context: RunContext, options: ConfirmOp
           // Matching compares titles in NFC; a new title is written in that form too, so the next run matches it.
           const title = item.entry.title.normalize('NFC');
           const id = documentIds.get(path) as string;
-          const created = await linear.createDocument(placeId(targets, item.entry.place), { id, title, content: body });
+          const created = await linear.createDocument(placeId(targets, item.entry.place), { id, title, content: body }, { sameContent: holdsText });
           remember(path, created);
           sentHashes.set(path, hash);
+          vouched.add(path);
           result.created.push(path);
           await checkpoint('document-created-before-ids-push');
           written += 1;
@@ -461,6 +497,7 @@ export async function confirmInitialSync(context: RunContext, options: ConfirmOp
           const updated = await linear.updateDocument(item.entry.documentId, { content: body });
           remember(path, updated);
           sentHashes.set(path, hash);
+          vouched.add(path);
           result.overwritten.push(path);
           written += 1;
           unpushed += 1;
@@ -485,6 +522,12 @@ export async function confirmInitialSync(context: RunContext, options: ConfirmOp
           result.stopped = error.reason;
           result.notAttempted = work.slice(index).map((rest) => rest.entry.path);
           break;
+        }
+        if (error instanceof LinearCreateEditedError) {
+          // Created, but edited before its lost answer was read back: the text is not this run's write. The
+          // path keeps its reserved id, and the first sync takes the document in as Linear holds it.
+          result.leftOutAtWrite.push({ path, rule: 'changed-during-run' });
+          continue;
         }
         if (error instanceof LinearReadBackError) {
           // Written, but what Linear stored is unknown: keep the id, and let the next run read the content.
@@ -597,7 +640,7 @@ export async function confirmInitialSync(context: RunContext, options: ConfirmOp
     if (expected.linear !== null && (await sameRecord(expected.linear, linearCommit))) linearCommit = expected.linear;
 
     // New documents left out while writing keep their chosen ids, which other documents may link to.
-    const created = new Set(plan.create.map((entry) => entry.path));
+    const created = new Set([...plan.create.map((entry) => entry.path), ...createdBefore]);
     const stillReserved = new Map(
       result.leftOutAtWrite.filter(({ path }) => created.has(path)).map(({ path }) => [path, documentIds.get(path) as string]),
     );

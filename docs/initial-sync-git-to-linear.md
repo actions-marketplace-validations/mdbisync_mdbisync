@@ -162,7 +162,12 @@ Linear while the run reads it, or before the run overwrites or trashes it
 (moved to another team or project, renamed, trashed, archived or edited), is
 left out with the file its title names (`changed-during-run`), or under its
 id as in **Move to trash** when no file has its title: it is neither
-written nor trashed, and the next run plans it again. Each rule and
+written nor trashed, and the next run plans it again. A new document the
+run created is left out the same way when Linear's answer to the create was
+lost and someone edited the document before the run read it back; a resumed
+run leaves it out again. Once the initial sync has completed, run the sync
+for it, not the initial sync: the sync takes the edit in as a change made in
+Linear, while another initial sync would write the file over it. Each rule and
 what to do about it is in
 [troubleshooting.md](troubleshooting.md#files-left-out).
 
@@ -258,6 +263,11 @@ Run it again with the same inputs, after the reset time in the summary when
 it was rate limited. It plans again, skips the documents an earlier run
 wrote, finds a document created just before a crash by its title instead
 of creating it twice, and records `linear` once everything is written.
+It trusts what an earlier run recorded about a written document only when
+the sync signed that record with its Linear client secret; otherwise,
+for example after the secret changed or someone edited the state, it skips
+the document only when the document holds the file's text, and writes it
+again when it does not.
 Until then every sync run writes nothing and stops with
 `initial-sync-required` and exit code 4.
 

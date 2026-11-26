@@ -12,8 +12,9 @@ import { INCOMPLETE_EXIT_CODE, NO_STATE_EXIT_CODE } from '../commands.ts';
 import { type RunReport } from '../run/finish.ts';
 import { environmentName, readInputs } from '../run/inputs.ts';
 import { runPreflight } from '../run/preflight.ts';
-import { Git, type IdEntry } from '../state/index.ts';
-import { LinearClient, LinearResponseLimitError } from '../linear/index.ts';
+import { Git, type IdEntry, NEUTRAL_IDENTITY, commitIds, readIds as readIdMap, readWrittenHashes, readWrittenMacs } from '../state/index.ts';
+import { observedDigest } from '../sync/recorded.ts';
+import { type LinearDocument, LinearClient, LinearResponseLimitError } from '../linear/index.ts';
 import { type FakeWorld, GITHUB_API, LINEAR_API, fakeFetch, fakeWorld, touch, virtualCheckClock } from '../setup/test-helpers.ts';
 import { type Fixture, createFixture } from '../state/test-helpers.ts';
 import { type ConfirmedResult, FINAL_IDS_MESSAGE, PROGRESS_MESSAGE, confirmInitialSync, holdsBody } from './confirm.ts';
@@ -399,6 +400,9 @@ describe('confirmed initial sync from git to Linear', () => {
     assert.equal((await run(world)).result.exitCode, INCOMPLETE_EXIT_CODE);
     const written = JSON.parse(await show('refs/mdbisync/ids:written.json')) as Record<string, string>;
     assert.deepEqual(Object.keys(written).sort(), SYNCED_PATHS.slice(0, 2));
+    // Each receipt carries the sync's signature: Linear's form alone does not show the document holds the text.
+    const macs = JSON.parse(await show('refs/mdbisync/ids:written-macs.json')) as Record<string, string>;
+    assert.deepEqual(Object.keys(macs).sort(), SYNCED_PATHS.slice(0, 2));
 
     delete world.linear.writes.rateLimitAt;
     const writes = world.linear.writes.count;
@@ -408,6 +412,7 @@ describe('confirmed initial sync from git to Linear', () => {
     assert.equal(world.linear.writes.count - writes, SYNCED_PATHS.length - 2);
     // The finished state keeps no progress files.
     assert.equal((await fixture.remote.run(['cat-file', '-e', 'refs/mdbisync/ids:written.json'], { okCodes: [0, 128] })).code, 128);
+    assert.equal((await fixture.remote.run(['cat-file', '-e', 'refs/mdbisync/ids:written-macs.json'], { okCodes: [0, 128] })).code, 128);
   });
 
   it('a resumed run writes again a document a member edited since the stop, so the edit is never recorded unchecked', async () => {
@@ -443,6 +448,70 @@ describe('confirmed initial sync from git to Linear', () => {
     assert.equal(sync.exitCode, 0, sync.stderr);
     assert.deepEqual(world.github.pullRequests, [], 'a sync pull request was opened');
     assert.equal(await holding(), '');
+  });
+
+  it('a resumed run does not trust a write receipt the sync did not sign, so a forged one never records a body unchecked', async () => {
+    const world = fakeWorld();
+    world.linear.writes.rateLimitAt = 3;
+    assert.equal((await run(world)).result.exitCode, INCOMPLETE_EXIT_CODE);
+    const [forged, untouched] = SYNCED_PATHS as [string, string];
+    // The stopped run signed the receipts of what it wrote.
+    const git = fixture.remote;
+    const tip = await git.revParse('refs/mdbisync/ids');
+    assert.deepEqual([...(await readWrittenMacs(git, tip)).keys()].sort(), [forged, untouched]);
+
+    // Someone who may push the state and edit the document puts another body in it and rewrites the progress
+    // commit so its receipt matches the document as it is now: same text hash, the new observed digest, the old signatures.
+    const ids = await readIdMap(git, tip);
+    const document = world.linear.documents.find((d) => d.id === ids.get(forged)?.id);
+    assert.ok(document !== undefined, `${forged} was not written by the first run`);
+    const added = 'forged-body-7d2e41';
+    document.content = `# Handbook\n\n${added}`;
+    touch(document);
+    ids.set(forged, { ...(ids.get(forged) as IdEntry), observedDigest: observedDigest({ ...document, updatedAt: document.updatedAt ?? document.createdAt } as unknown as LinearDocument) });
+    const forgedTip = await commitIds(git, tip, ids, NEUTRAL_IDENTITY, {
+      message: await git.text(['show', '-s', '--format=%B', tip]),
+      always: true,
+      written: await readWrittenHashes(git, tip),
+      writtenMacs: await readWrittenMacs(git, tip),
+    });
+    await git.run(['update-ref', 'refs/mdbisync/ids', forgedTip, tip]);
+
+    delete world.linear.writes.rateLimitAt;
+    const { result, report } = await run(world);
+    assert.equal(result.exitCode, 0, result.stderr);
+    assert.equal(report.resumed, true);
+    assert.ok(report.initialSync?.overwritten.includes(forged), `${forged} was trusted on the forged receipt`);
+    assert.deepEqual(report.initialSync?.skippedCompleted, [untouched]);
+    assert.equal(document.content, SYNCED[forged as keyof typeof SYNCED].body);
+    await assertConverged(world);
+    // No pushed ref holds the forged body: it was neither recorded nor signed.
+    const all = Object.keys(await refs());
+    assert.equal((await fixture.remote.run(['grep', '-l', '-F', added, ...all], { okCodes: [0, 1] })).stdout.toString().trim(), '');
+  });
+
+  it('a resume from progress without signatures, as an earlier version wrote it, writes again what it cannot compare', async () => {
+    const world = fakeWorld();
+    // A form the format module does not predict: the document cannot show it holds the file's text.
+    world.linear.store = (content) => `${content}\n\nStored.`;
+    world.linear.writes.rateLimitAt = 3;
+    assert.equal((await run(world)).result.exitCode, INCOMPLETE_EXIT_CODE);
+    const git = fixture.remote;
+    const tip = await git.revParse('refs/mdbisync/ids');
+    const unsigned = await commitIds(git, tip, await readIdMap(git, tip), NEUTRAL_IDENTITY, {
+      message: await git.text(['show', '-s', '--format=%B', tip]),
+      always: true,
+      written: await readWrittenHashes(git, tip),
+    });
+    assert.deepEqual(await readWrittenMacs(git, unsigned), new Map());
+    await git.run(['update-ref', 'refs/mdbisync/ids', unsigned, tip]);
+
+    delete world.linear.writes.rateLimitAt;
+    const { result, report } = await run(world);
+    assert.equal(result.exitCode, 0, result.stderr);
+    assert.equal(report.resumed, true);
+    assert.deepEqual(report.initialSync?.skippedCompleted, []);
+    for (const path of SYNCED_PATHS.slice(0, 2)) assert.ok(report.initialSync?.overwritten.includes(path), `${path} was skipped on an unsigned receipt`);
   });
 
   it('a document found holding a newer text drops the stopped write, so a file that goes back to the written text is written again', async () => {
@@ -579,6 +648,77 @@ describe('confirmed initial sync from git to Linear', () => {
       await assertConverged(world);
     });
   }
+
+  /** A fetch wrapper: the first CreateDocument of `backend/notes` is applied, its answer is lost, and a person edits the new document before the client reads it back. */
+  const editedLostCreate = (world: FakeWorld) => {
+    const fault = { dropped: undefined as string | undefined, wrap: (fetch: typeof globalThis.fetch): typeof globalThis.fetch => async (input, init) => {
+      const request = String(input) === `${LINEAR_API}/graphql` ? JSON.parse(String(init?.body)) as { operationName?: string; variables?: { input?: { id?: string; title?: string } } } : undefined;
+      if (fault.dropped === undefined && request?.operationName === 'CreateDocument' && request.variables?.input?.title === 'backend/notes') {
+        fault.dropped = request.variables.input.id;
+        await fetch(input, init);
+        const document = world.linear.documents.find((d) => d.id === fault.dropped);
+        assert.ok(document !== undefined);
+        document.content = `${document.content ?? ''}\n\nTyped in Linear.`;
+        touch(document);
+        throw new TypeError('fetch failed', { cause: Object.assign(new Error('read ECONNRESET'), { code: 'ECONNRESET' }) });
+      }
+      return fetch(input, init);
+    } };
+    return fault;
+  };
+
+  it('a resumed run leaves out a document the stopped run created and found edited, and does not overwrite it', async () => {
+    const world = fakeWorld();
+    const path = 'eng/backend/notes.md';
+    const fault = editedLostCreate(world);
+    // The write after the edited create is rate limited: the run stops before it records anything final.
+    world.linear.writes.rateLimitAt = 4;
+    const first = await run(world, {}, fault.wrap);
+    assert.equal(first.result.exitCode, INCOMPLETE_EXIT_CODE, first.result.stderr);
+    assert.equal(first.report.code, 'stopped');
+    assert.ok(fault.dropped !== undefined, 'the fault never fired');
+    assert.deepEqual(first.report.initialSync?.leftOutAtWrite, [{ path, rule: 'changed-during-run' }]);
+
+    delete world.linear.writes.rateLimitAt;
+    const second = await run(world);
+    assert.equal(second.result.exitCode, 0, second.result.stderr);
+    assert.equal(second.report.resumed, true);
+    assert.deepEqual(second.report.initialSync?.leftOutAtWrite, [{ path, rule: 'changed-during-run' }]);
+    assert.ok(!second.report.initialSync?.overwritten.includes(path));
+    assert.match(world.linear.documents.find((d) => d.id === fault.dropped)?.content ?? '', /Typed in Linear\./, 'the edit was overwritten');
+    assert.equal(world.linear.documents.filter((d) => d.title === 'backend/notes' && d.trashed !== true).length, 1);
+    assert.equal((await readIds())[path], undefined);
+    // Its id stays reserved for the path, as when the run had not stopped: links written to it stay right.
+    assert.equal((JSON.parse(await show('refs/mdbisync/ids:reserved-ids.json')) as Record<string, string>)[path], fault.dropped);
+  });
+
+  it('a create whose lost answer is read back after a person edited the document is not recorded as written', async () => {
+    const world = fakeWorld();
+    const path = 'eng/backend/notes.md';
+    const fault = editedLostCreate(world);
+    const { result, report } = await run(world, {}, fault.wrap);
+    const { dropped } = fault;
+    assert.equal(result.exitCode, 0, result.stderr);
+    assert.ok(dropped !== undefined, 'the fault never fired');
+    assert.deepEqual(report.initialSync?.failed, []);
+    assert.deepEqual(report.initialSync?.created, SYNCED_PATHS.filter((synced) => synced !== path));
+    assert.deepEqual(report.initialSync?.leftOutAtWrite, [{ path, rule: 'changed-during-run' }]);
+    // Created once and not sent again; the person's text stays in Linear.
+    assert.equal(world.linear.documents.filter((d) => d.title === 'backend/notes').length, 1);
+    assert.match(world.linear.documents.find((d) => d.id === dropped)?.content ?? '', /Typed in Linear\./);
+    // Not recorded as this run's write: the path has no id, and the id stays reserved for it.
+    assert.equal((await readIds())[path], undefined);
+    assert.equal((JSON.parse(await show('refs/mdbisync/ids:reserved-ids.json')) as Record<string, string>)[path], dropped);
+
+    // The first sync takes the document in as a change made in Linear, with the person's text: git's file at the
+    // path is not the document's, so it comes in at a path of its own. Linear keeps one document.
+    const sync = await runCli(['sync'], { env: env({ MDBISYNC_DIRECTION: '', MDBISYNC_CONFIRM: '' }), cwd, fetch: fakeFetch(world), checkClock: virtualCheckClock() });
+    assert.equal(sync.exitCode, 0, sync.stderr);
+    const taken = Object.entries(await readIds()).find(([, entry]) => entry.id === dropped);
+    assert.ok(taken !== undefined && taken[0] !== path, JSON.stringify(taken));
+    assert.match(await show(`refs/mdbisync/linear:${taken[0]}`), /Typed in Linear\./);
+    assert.equal(world.linear.documents.filter((d) => d.title === 'backend/notes').length, 1);
+  });
 
   it('a rejected write is named; the rest are written, but nothing is trashed or recorded until it succeeds', async () => {
     const world = fakeWorld();
