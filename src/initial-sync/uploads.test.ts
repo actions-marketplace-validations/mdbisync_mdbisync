@@ -10,14 +10,14 @@ import { join } from 'node:path';
 import { afterEach, beforeEach, describe, it } from 'node:test';
 import { runCli } from '../cli.ts';
 import { assertWritesMatchWorld, markWorld } from '../run/test-helpers.ts';
-import { fixText } from '../format/index.ts';
+import { fixLinearText, fixText } from '../format/index.ts';
 import { INCOMPLETE_EXIT_CODE } from '../commands.ts';
-import { LinearClient } from '../linear/index.ts';
+import { LinearClient, isUploadUrl } from '../linear/index.ts';
 import { type RunReport } from '../run/finish.ts';
 import { Git, commitTree } from '../state/index.ts';
 import { type FakeUpload, type FakeWorld, GITHUB_API, LINEAR_API, UPLOADS_HOST, fakeFetch, fakeWorld } from '../setup/test-helpers.ts';
 import { type Fixture, IDENTITY, countLocalLfsObjects, createFixture } from '../state/test-helpers.ts';
-import { DEFAULT_UPLOAD_LIMIT, findFileLinks, replaceRanges, resolveTarget, restoreFileLinks } from './uploads.ts';
+import { DEFAULT_UPLOAD_LIMIT, FileTargetsAddedError, checkFileTargets, findFileLinks, replaceRanges, resolveTarget, restoreFileLinks } from './uploads.ts';
 import { runScaleScript } from '../scale-test-helpers.ts';
 
 const CANARY = 'kx-5d2a9e40';
@@ -630,6 +630,28 @@ describe('file links in a document', () => {
     assert.equal(resolveTarget('b.md', 'dir/'), null);
   });
 
+  it('resolves no destination with a scheme as the URL parser reads it, as written or decoded', () => {
+    // Whitespace in a name or after it is no scheme: the link stays a repository file, which the gate checks.
+    for (const [url, target] of [['my%20file.png', 'my file.png'], ['report%09draft.png', 'report\tdraft.png'], ['c.png#a b', 'c.png'], ['c.png?a%20', 'c.png'], ['a%3Ab.png', 'a:b.png'], ['https%3A//h/x/../../c.png', 'https:/c.png']] as Array<[string, string]>) {
+      assert.equal(resolveTarget('b.md', url), target, JSON.stringify(url));
+    }
+    for (const url of [' https://h/x/../../c.png', '\thttps://h/x/../../c.png', 'ht\ntps://h/../c.png', '\u0001https://h/x/../../c.png', ' /c.png', ' #c', '%20https://h/x/../../c.png', '%09https://h/x/../../c.png', 'ht%0Atps://h/x/../../c.png', '%01https://h/x/../../c.png']) {
+      assert.equal(resolveTarget('b.md', url), null, JSON.stringify(url));
+    }
+  });
+
+  it('counts as an upload only a URL spelled as one, which the authenticated download also refuses otherwise', async () => {
+    assert.equal(isUploadUrl('https://uploads.linear.app/a/b?c#d'), true);
+    const { GraphQLTransport } = await import('../linear/transport.ts');
+    let requests = 0;
+    const transport = new GraphQLTransport({ token: 'test-access-token', fetch: async () => { requests++; return new Response(null); } });
+    for (const url of [' https://uploads.linear.app/a', '\thttps://uploads.linear.app/a', 'https://uploads.linear.app/a\n/b', 'https://uploads.linear.app/a\u0001', 'https://uploads.linear.app/a ', 'HTTPS://uploads.linear.app/a', 'https://Uploads.linear.app/a', 'https:uploads.linear.app/a', 'https:\\\\uploads.linear.app/a', 'https://uploads.linear.app:443/a', 'https://uploads.linear.app.example.com/a']) {
+      assert.equal(isUploadUrl(url), false, JSON.stringify(url));
+      await assert.rejects(transport.fetchUpload(url), /not allowed/, JSON.stringify(url));
+    }
+    assert.equal(requests, 0);
+  });
+
   it('an uploaded MP3 alone in a bullet round-trips byte for byte in the form fix writes', () => {
     // Linear stores the link on the bullet's line with the upload URL in angle brackets.
     const source = '## Attachments\n\n* \n  [Voice note](../media/voice-note.mp3)\n\nRef';
@@ -667,6 +689,29 @@ describe('file links in a document', () => {
       'Pasted: `https://uploads.example.test/1` and ![old](https://uploads.example.test/1?v=2)\n\n![x](a.png) ![y](./a.png) [z](<b.png#p>)\n\n![w](<c d.png>)\n\n[v](e.png#q)',
       'only the written destinations are mapped back',
     );
+  });
+});
+
+describe('checkFileTargets', () => {
+  const added = (before: string, after: string) => assert.throws(() => checkFileTargets('docs/plan.md', before, after), FileTargetsAddedError, JSON.stringify(after));
+  it('allows a rewrite that keeps the files linked and embedded, in another spelling', () => {
+    checkFileTargets('docs/plan.md', '* [Report](report.csv)\n\n![Chart](./chart.png)', '* [Report](<report.csv>)\n\n![Chart](chart.png)');
+    // An image written as a link embeds nothing.
+    checkFileTargets('docs/plan.md', '![Chart](chart.png)', '[Chart](chart.png)');
+    // An image of a URL in `fix`'s spelling is the same image.
+    checkFileTargets('docs/plan.md', '![Image](</my image.png>)', '![Image](/my%20image.png)');
+    checkFileTargets('docs/plan.md', '![Image](<https://example.com/a b.png>)', '![Image](https://example.com/a%20b.png)');
+    const linear = '![Image](</my image.png>)';
+    checkFileTargets('docs/plan.md', linear, fixLinearText(linear, linear, () => false));
+  });
+  it('refuses a link or image to a file only the rewritten text holds', () => {
+    added('    [Secret](secret.csv)', '[Secret](secret.csv)');
+    added('    ![x](secret.png)', '![x](secret.png)');
+    // A link to a file does not let the rewrite embed it as an image, also through a reference.
+    added('[x](secret.png)', '![x](secret.png)');
+    added('[x][s]\n\n[s]: secret.png', '![x][s]\n\n[s]: secret.png');
+    // An image of a URL the checks never read is refused too.
+    added('    ![x](https://uploads.linear.app/workspace/a)', '![x](https://uploads.linear.app/workspace/a)');
   });
 });
 

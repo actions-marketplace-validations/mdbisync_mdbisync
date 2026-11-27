@@ -29,6 +29,7 @@ import { LINK_VARIANT_LINKS, capture } from '../sync/capture.ts';
 import { SYNC_BRANCH_MERGE_MESSAGE } from '../sync/pull-request.ts';
 import { candidateKey } from '../sync/staged.ts';
 import { FINAL_IDS_MESSAGE, PROGRESS_MESSAGE } from './confirm.ts';
+import { destinations, resolveTarget } from './uploads.ts';
 import { planInitialSync } from './plan.ts';
 import { type ReversePlan, type ReversePlanInput, PULL_REQUEST_TITLE, REVERSE_RECORD_MESSAGE, confirmLinearToGit, planLinearToGit, pullRequestBody } from './reverse.ts';
 import { renderReverseConfirmed } from './summary.ts';
@@ -712,6 +713,18 @@ describe('initial sync from Linear to the tracked branch', () => {
     assert.equal(world.linear.comments.size, 0);
   });
 
+  it('leaves out a document whose nested block join would turn a code block\'s image into a live one', async () => {
+    const world = fakeWorld();
+    // Read as Linear's text, the image is indented code; joined onto the item's line, it is the item's paragraph.
+    world.linear.documents = linearDocuments().map((doc) => doc.id === 'doc-runbook' ? {...doc, content: 'Parent\n*\n  [Site](https://example.com/a)\n\n    ![x](secret.png)\n'} : doc);
+    const {result, report} = await run(world);
+    assert.equal(result.exitCode, 0, result.stderr);
+    assert.deepEqual(report.linearToGit?.leftOutAtRecord, [{path:'eng/ops/runbook.md', rule:'image-blocked'}]);
+    const tree = await files('refs/mdbisync/linear');
+    assert.ok(!tree.includes('eng/ops/runbook.md'));
+    assert.ok(tree.includes('eng/notes/faq.md'));
+  });
+
   it('refuses unsupported attachment bytes equal to a removed Markdown page instead of linking that page', async () => {
     const world = fakeWorld();
     const bytes = Buffer.from(TREE['eng/backend/notes.md'] as string);
@@ -811,6 +824,31 @@ describe('initial sync from Linear to the tracked branch', () => {
     assert.equal(world.linear.uploads.length, beforeUploads, 'the repaired path uploaded a repository file');
     assert.match(world.linear.documents.find(d => d.id === 'doc-faq')!.content!, /\[Diagram\]/);
 
+  });
+
+  it('uploads no repository file for an upload URL the URL parser would rewrite, dead or repaired', async () => {
+    await fixture.seed({'private/report.csv': 'account,balance\nexample,1000\n'});
+    const world = fakeWorld();
+    // The URL parser drops a leading space or control and removes tabs and newlines: an upload to it, a path
+    // from the document to `private/report.csv` to a repository reader.
+    const climb = 'https://uploads.linear.app/a/b/../../../../../../private/report.csv';
+    const images = ['< ', '&#32;', '&#9;', '&#10;', '<\u0001'].map((lead, index) => `![Chart ${index}](${lead}${climb}${lead.startsWith('<') ? '>' : ''})`);
+    world.linear.documents = linearDocuments().map((d) => (d.id === 'doc-plan' ? { ...d, content: `# Plan\n\n${images.join('\n\n')} ${CANARY}\n` } : d));
+    const initial = await run(world);
+    assert.equal(initial.result.exitCode, 0, initial.result.stderr);
+    await merge(world);
+    const captured = await run(world, {}, 'sync');
+    assert.equal(captured.result.exitCode, 0, captured.result.stderr);
+    const repaired = await show('refs/heads/mdbisync/linear:eng/notes/plan.md');
+    assert.doesNotMatch(repaired, /!\[Chart/);
+    const links = destinations(repaired).filter(({node}) => node.url.includes('report.csv'));
+    assert.equal(links.length, images.length);
+    for (const {node} of links) assert.equal(resolveTarget('eng/notes/plan.md', node.url), null, node.url);
+    await merge(world);
+    const written = await run(world, {}, 'sync');
+    assert.equal(written.result.exitCode, 0, written.result.stderr);
+    assert.equal(world.linear.uploads.length, 0, 'the repaired link uploaded a repository file');
+    assert.ok(!world.requests.some((request) => request.includes('report.csv')), 'the rewritten URL was downloaded');
   });
 
   it('keeps shadowed image definitions out of initial import and the next capture', async () => {
